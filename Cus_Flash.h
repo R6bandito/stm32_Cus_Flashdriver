@@ -1,28 +1,21 @@
-
-/**
- * @file    Cus_Flash.h
- * @brief   STM32 内部 Flash 抽象驱动模块
- * 
- * @details 本模块通过设备宏（DEVICE_STM32F1xx / DEVICE_STM32F4xx）支持多芯片平台。
- *          提供了 Flash 解锁/上锁、等待延时校准、缓冲区写入/校验、页/扇区擦除等基础操作，
- *          并内置了可选的 IWDG 看门狗喂狗机制（FEED_IWDG_AUTO）。
- * 
- * @note    页写入结构体可通过 CUS_FLASH_USE_DYNAMIC_PAGE 选择动态或静态分配，
- *          静态分配仅占用一份 RAM 且为单例。
- * 
- * @warning 所有写入或擦除操作前必须确保目标地址已被解锁且处于空闲状态，
- *          操作完成后必须调用 Cus_Flash_Lock 上锁保护 (这通常已在内部自主完成)。
- */
 #ifndef __CUS_FALSH_H__
 #define __CUS_FALSH_H__
 
 
-/* ****************************************************** */
-  #define DEVICE_STM32F1xx          (1)
-  #define DEVICE_STM32F4xx          (0)
-
 
 /* ****************************************************** */
+	#define DEVICE_STM32F1xx          			(0)
+	#define DEVICE_STM32F4xx          			(1)
+		#if (DEVICE_STM32F4xx)
+			#define DEVICE_FLASH_TOTAL_SIZE		(256UL * 1024UL)
+			#warning "Please change DEVICE_FLASH_TOTAL_SIZE to your acutal value. And the format like this: (e.g., 2048*1024 for F42x/F43x)!"
+		#endif /* DEVICE_STM32F4xx */
+/* ****************************************************** */
+
+
+#if (DEVICE_STM32F1xx) && (DEVICE_STM32F4xx)
+	#error "DEVICE_STM32F1xx & DEVICE_STM32F4xx can't be TRUE!" 
+#endif /* (DEVICE_STM32F1xx) && (DEVICE_STM32F4xx) */
 
 
 #if (DEVICE_STM32F1xx)
@@ -50,78 +43,91 @@ typedef enum Cus_Flash_State
 
 
 /* *********************** Define ************************ */
-  #if (DEVICE_STM32F1xx)
-    #define SYSTEMCLOCK_24Mhz           (24000000UL)
-    #define SYSTEMCLOCK_48Mhz           (48000000UL)
-    #define SYSTEMCLOCK_72Mhz           (72000000UL)
-    #define FLASH_SIZE_REG              (*((uint16_t *)0x1FFFF7E0UL)) 
-  #endif // DEVICE_STM32F1xx
+#if (DEVICE_STM32F1xx)
+	#define SYSTEMCLOCK_24Mhz           (24000000UL)
+	#define SYSTEMCLOCK_48Mhz           (48000000UL)
+	#define SYSTEMCLOCK_72Mhz           (72000000UL)
+	#define FLASH_SIZE_REG              (*((volatile uint16_t *)0x1FFFF7E0UL)) 
+#endif // DEVICE_STM32F1xx
 
-  #if (DEVICE_STM32F4xx)
-    #define SYSTEMCLOCK_30Mhz           (30000000UL)
-    #define SYSTEMCLOCK_60Mhz           (60000000UL)
-    #define SYSTEMCLOCK_90Mhz           (90000000UL)
-    #define SYSTEMCLOCK_120Mhz          (120000000UL)
-    #define SYSTEMCLOCK_150Mhz          (150000000UL)
-    #define SYSTEMCLOCK_168Mhz          (168000000UL)
-    #define FLASH_SIZE_REG              (*((uint16_t *)0x1FFF7A22UL))
-  #endif // DEVICE_STM32F4xx
+#if (DEVICE_STM32F4xx)
+	#define SYSTEMCLOCK_30Mhz           (30000000UL)
+	#define SYSTEMCLOCK_60Mhz           (60000000UL)
+	#define SYSTEMCLOCK_90Mhz           (90000000UL)
+	#define SYSTEMCLOCK_120Mhz          (120000000UL)
+	#define SYSTEMCLOCK_150Mhz          (150000000UL)
+	#define SYSTEMCLOCK_168Mhz          (168000000UL)
+	#define FLASH_SIZE_REG              (*((volatile uint16_t *)0x1FFF7A22UL))
 
-  #define FLASH_KEYR_KEY1               (0x45670123UL)
-  #define FLASH_KEYR_KEY2               (0xCDEF89ABUL)
-  #define FLASH_ERASE_TIMEOUT_MS        (100U)
-  #define FLASH_SIZE_BYTES              (FLASH_SIZE_REG * 1024UL)
-  #define FLASH_END_ADDR                (FLASH_BASE + FLASH_SIZE_BYTES)
+	#define CUS_FLASH_SECTOR_16K		(16UL * 1024UL)
+	#define CUS_FLASH_SECTOR_64K		(64UL * 1024UL)
+	#define CUS_FLASH_SECTOR_128K		(128UL * 1024UL)
+#endif // DEVICE_STM32F4xx
+
+#define FLASH_KEYR_KEY1               	(0x45670123UL)
+#define FLASH_KEYR_KEY2               	(0xCDEF89ABUL)
+#define FLASH_ERASE_TIMEOUT_MS        	(100U)
+#define FLASH_SIZE_BYTES              	(FLASH_SIZE_REG * 1024UL)
+#define FLASH_END_ADDR                	(FLASH_BASE + FLASH_SIZE_BYTES)
 /* ******************************************************* */
 
-/* *********************** Config ************************ */
-  #define FEED_IWDG_AUTO                (1)     // 1=使用IWDG.耗时操作时将主动喂狗. 0=不使用IWDG.程序逻辑不负责喂狗.
-  #define CUS_FLASH_USE_DYNAMIC_PAGE    (0)     // 1=动态分配. 0=静态分配.
 
-  #if defined(FLASH_TYPEERASE_PAGES)
-    #define FLASH_BYTES_PER_PAGE        (2048U)
-  #endif 
-/* ******************************************************* */
 
 /* ----------------------------------------------------------- */
-#if defined(FLASH_TYPEERASE_PAGES) 
+#if defined(FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx)
 
-/**
- * @brief Flash 页操作控制块
- * @note  通过 Factory_GetPageControlBlock 获取，使用完后需调用 Release 释放。
- *        可使用 Reset 清空内容后复用。
-*/
-  typedef struct Cus_Flash_Page Cus_Flash_Page_t;
-  struct Cus_Flash_Page
-  {
-    uint8_t PageDataBuffer[FLASH_BYTES_PER_PAGE];
-    uint32_t PageAddress;
-
-    void (*Reset)( Cus_Flash_Page_t *pPage );
-    void (*Release)( Cus_Flash_Page_t *pPage );
-  };
+	#define FLASH_BYTES_PER_PAGE        (1024U)
 
 
-  Cus_Flash_State_t Cus_Flash_ErasePage(uint32_t PageAddress);
-  uint16_t Cus_Flash_ErasePages( uint32_t PageStartAddress, uint16_t PageCount );
-  uint32_t Cus_Flash_GetPageAddress( uint32_t page_index );
-  uint32_t Cus_Flash_GetPageStart( uint32_t Address );
-  int16_t Cus_Flash_GetPageIndex( uint32_t Address );
-  uint16_t Cus_Flash_GetTotalPages( void );
-  int32_t Cus_Flash_GetRemainPages( uint32_t PageAddress );
-  Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_Page_t *pPage );
-  Cus_Flash_State_t Factory_GetPageControlBlock( Cus_Flash_Page_t **pPageOut );
-  bool Cus_Flash_ReadOutPage( uint32_t PageAddress, uint8_t *pOutBuffer, int32_t Size );
+	typedef struct Cus_Flash_Page Cus_Flash_Page_t;
+	struct Cus_Flash_Page
+	{
+		uint8_t PageDataBuffer[FLASH_BYTES_PER_PAGE];
+		uint32_t PageAddress;
+
+		void (*Reset)( Cus_Flash_Page_t *pPage );
+		void (*Release)( Cus_Flash_Page_t *pPage );
+	};
 
 
-  void Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage );
-  void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage );
+	Cus_Flash_State_t Cus_Flash_ErasePage(uint32_t PageAddress);
+	uint16_t Cus_Flash_ErasePages( uint32_t PageStartAddress, uint16_t PageCount );
+	uint32_t Cus_Flash_GetPageAddress( uint32_t page_index );
+	uint32_t Cus_Flash_GetPageStart( uint32_t Address );
+	int16_t Cus_Flash_GetPageIndex( uint32_t Address );
+	uint16_t Cus_Flash_GetTotalPages( void );
+	int32_t Cus_Flash_GetRemainPages( uint32_t PageAddress );
+	Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_Page_t *pPage );
+	Cus_Flash_State_t Factory_GetPageControlBlock( Cus_Flash_Page_t **pPageOut );
+	bool Cus_Flash_ReadOutPage( uint32_t PageAddress, uint8_t *pOutBuffer, int32_t Size );
 
-#endif // FLASH_TYPEERASE_PAGES
 
-#if defined(FLASH_TYPEERASE_SECTORS)
+	void Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage );
+	void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage );
 
-#endif // FLASH_TYPEERASE_SECTORS
+#endif /* (FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx) */
+
+
+
+#if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
+	typedef struct 
+	{
+		uint8_t secIndex;
+		uint32_t secStartAddr;
+		uint32_t secSize;
+
+	} Cus_Flash_Sector_t;
+
+	const Cus_Flash_Sector_t *Cus_Flash_GetSectorbyAddr( uint32_t Addr );
+	const Cus_Flash_Sector_t *Cus_Flash_GetSectorbyIndex( uint8_t Index );
+	uint8_t Cus_Flash_GetTotalSectors( void );
+	uint8_t Cus_Flash_GetRemainSectors( uint8_t Index );
+	uint32_t Cus_Flash_GetSectorSize( uint8_t Index );
+
+	void Cus_Flash_EnableART( void );
+
+	void Cus_FLASH_ARTEnableFailed_Hook( uint32_t ACR_ConfigWord );
+#endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 /* ----------------------------------------------------------- */
 
 
