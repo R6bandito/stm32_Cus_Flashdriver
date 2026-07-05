@@ -35,7 +35,7 @@ typedef enum Cus_Flash_State
   CUS_FLASH_TIMEOUT,
   CUS_FLASH_BUSY,
   CUS_FLASH_ERROR,
-  CUS_FLASH_PARAMERR,
+  CUS_FLASH_PARAMETER,
   CUS_FLASH_PROGRAM_WRPRTERR,
   CUS_FLASH_PROGRAM_PGERR
 
@@ -102,8 +102,8 @@ typedef enum Cus_Flash_State
 	bool Cus_Flash_ReadOutPage( uint32_t PageAddress, uint8_t *pOutBuffer, int32_t Size );
 
 
-	void Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage );
-	void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage );
+	__weak void Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage );
+	__weak void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage );
 
 #endif /* (FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx) */
 
@@ -112,11 +112,23 @@ typedef enum Cus_Flash_State
 #if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
 	typedef struct 
 	{
+		/*  */
 		uint8_t secIndex;
 		uint32_t secStartAddr;
 		uint32_t secSize;
 
 	} Cus_Flash_Sector_t;
+
+
+	typedef struct 
+	{
+		/*  */
+		const Cus_Flash_Sector_t *pSector;
+		uint8_t *pBuffer;
+		uint32_t bufSize;
+		uint32_t Offset;
+
+	} Cus_Flash_SecReq_t;
 
 	const Cus_Flash_Sector_t *Cus_Flash_GetSectorbyAddr( uint32_t Addr );
 	const Cus_Flash_Sector_t *Cus_Flash_GetSectorbyIndex( uint8_t Index );
@@ -125,8 +137,11 @@ typedef enum Cus_Flash_State
 	uint32_t Cus_Flash_GetSectorSize( uint8_t Index );
 
 	void Cus_Flash_EnableART( void );
+	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
+	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
 
-	void Cus_FLASH_ARTEnableFailed_Hook( uint32_t ACR_ConfigWord );
+	__weak void Cus_FLASH_ARTEnableFailed_Hook( uint32_t ACR_ConfigWord );
+	__weak void Cus_FLASH_EraseSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 /* ----------------------------------------------------------- */
 
@@ -141,10 +156,10 @@ typedef enum Cus_Flash_State
   bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 
 
-  void Cus_FLASH_UnlockFailed_Hook( void );
-  void Cus_FLASH_LockFailed_Hook( void );
-  void Cus_FLASH_EraseFailed_Hook( void );
-  void Cus_FLASH_VerifyBufferFailed_Hook( uint32_t StartAddress, uint8_t *pData, uint32_t BufferSize );
+  __weak void Cus_FLASH_UnlockFailed_Hook( void );
+  __weak void Cus_FLASH_LockFailed_Hook( void );
+  __weak void Cus_FLASH_EraseFailed_Hook( void );
+  __weak void Cus_FLASH_VerifyBufferFailed_Hook( uint32_t StartAddress, uint8_t *pData, uint32_t BufferSize );
 /* ----------------------------------------------------------- */
 
 

@@ -35,6 +35,8 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	uint32_t Cus_Flash_GetSectorSize( uint8_t Index );
 
 	void Cus_Flash_EnableART( void );
+	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
+	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 /* ****************************************************** */
 
@@ -97,18 +99,28 @@ Cus_Flash_Lock( void )
 {
 	uint32_t FLASH_CR_RegTemp = FLASH->CR;
 
-	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) != 0 )    return;   // 已经上锁. 直接返回.
+	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) != 0 )    return;   /* Has already be locked. Return. */
 
-	FLASH->CR = (FLASH->CR | (0x01UL << FLASH_CR_LOCK_Pos));
+	uint32_t timeout = Cus_Flash_GetSpinCount(100);
+	while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+	{
+		__nop();
+	}
+	if ( !timeout )
+	{
+		/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
+		Cus_FLASH_LockFailed_Hook();
+		return;
+	}
+
+	/* FLASH_CR Lock bit set. */
+	FLASH->CR |= FLASH_CR_LOCK_Msk;
 
 	FLASH_CR_RegTemp = FLASH->CR;
-
-	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) == 0 )
+	if ( !(FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) )
 	{
-		// 上锁失败. 依然处于解锁状态.
+		/* Lock failed! FLASH_CR Lock bit still reset.(write/read-back dismatch!) */
 		Cus_FLASH_LockFailed_Hook();
-
-		return;
 	}
 }
 
@@ -119,20 +131,32 @@ Cus_Flash_Unlock( void )
 {
 	uint32_t FLASH_CR_RegTemp = FLASH->CR;
 
-	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) == 0 )  return;   // FLASH已经被解锁. 直接返回.
+	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) == 0 )  return;   /* Has already be unlocked. Return. */
 
-	FLASH->KEYR = FLASH_KEYR_KEY1;    // 写入 KEY1.
+	uint32_t timeout = Cus_Flash_GetSpinCount(100);
+	while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+	{
+		__nop();
+	}
+	if ( !timeout )
+	{
+		/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
+		Cus_FLASH_UnlockFailed_Hook();
+		return;
+	}
 
-	FLASH->KEYR = FLASH_KEYR_KEY2;    // 写入 KEY2.
+	/* Start Flash unlock sequence by writing KEY1 to FLASH_KEYR. */ 
+	FLASH->KEYR = FLASH_KEYR_KEY1;    
+	__DSB();
+
+	/* Writing the last KEY Code(KEY2) to FLASH_KEYR. */
+	FLASH->KEYR = FLASH_KEYR_KEY2;    
 
 	FLASH_CR_RegTemp = FLASH->CR;
-
-	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) != 0 )    // 验证是否成功解锁.
+	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) )   
 	{
-		// 解锁失败.
+		/* Unlock failed! FLASH_CR Lock bit still set. (write/read-back dismatch!) */
 		Cus_FLASH_UnlockFailed_Hook();
-
-		return;
 	}
 }
 
@@ -236,11 +260,11 @@ Cus_Flash_State_t
 Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size )
 {
 	if ( StartAddress < FLASH_BASE || StartAddress > FLASH_END_ADDR || !pData || Buffer_Size == 0 )   
-		return CUS_FLASH_PARAMERR;
+		return CUS_FLASH_PARAMETER;
 
 	if ( (StartAddress & 0x01UL) != 0 )   // 地址未半字对齐. 
 	{
-		return CUS_FLASH_PARAMERR;
+		return CUS_FLASH_PARAMETER;
 	}
 
 	uint8_t is_NeedExtraEdit = 0;
@@ -677,6 +701,106 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		}
 
 		/* Success. Normal back. */
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector )
+	{
+		if ( !pSector )		return CUS_FLASH_PARAMETER;		/* Invalid parameter. */
+
+		uint32_t timeout = Cus_Flash_GetSpinCount(300);
+		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+		{
+			__nop();
+		}
+		if ( !timeout )
+		{
+			/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
+			Cus_FLASH_EraseSectorFailed_Hook(pSector);
+			return CUS_FLASH_BUSY;
+		}
+
+		Cus_Flash_Unlock();
+
+		/* Set FLASH_CR SER bit. */
+		FLASH->CR |= FLASH_CR_SER_Msk;
+
+		uint32_t snbVal = 0;
+		switch (gsc_secTotalCount)
+		{
+			/* Directly write secIndex to SNB. For 12-sector devices, indices 0~11 map 1:1 to hardware encoding. */ 
+			case 6:
+			case 8:
+			case 12:	snbVal = pSector->secIndex;	break;
+
+			/* Physical sectors 12~23 map to SNB values 16~27 (offset +4), because SNB 12~15 are reserved. */ 
+			case 24:	snbVal = (pSector->secIndex >= 12) ? (pSector->secIndex + 4) : (pSector->secIndex);
+
+			/* Unexpected sector index. Notify upper layer via hook and return. */
+			default:	goto ERROR;
+		}
+
+		/* Write SectorIndex which waiting for erasing to FLASH_CR SNB. */
+		FLASH->CR |= (snbVal << FLASH_CR_SNB_Pos);
+
+		/* Set FLASH_CR STRT bit. */
+		FLASH->CR |= FLASH_CR_STRT_Msk;
+
+		/* Wait for BSY to clear (erase finished). */
+		timeout = Cus_Flash_GetSpinCount(3000);		/* about 3s. */
+		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+		{
+			__nop();
+		}
+		if ( !timeout )
+		{
+			/* Error! BSY clear timeout. */
+			goto ERROR;
+		}
+
+		/* Normal back. */
+		Cus_Flash_Lock();
+		return CUS_FLASH_OK;
+
+	ERROR:
+		Cus_Flash_Lock();
+		Cus_FLASH_EraseSectorFailed_Hook(pSector);
+		return CUS_FLASH_ERROR;
+	}
+
+
+
+	uint8_t 
+	Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum )
+	{
+		if ( !pSector || !eNum )		return 0;
+
+		uint8_t Remain = Cus_Flash_GetRemainSectors(pSector->secIndex);
+		if ( eNum > (Remain + 1) )
+		{
+			/* Requested erase count exceeds remaining sectors. Return. */
+			return 0;
+		}
+
+		/* Erasing multiple sectors. */
+		Cus_Flash_State_t hReturn = CUS_FLASH_OK;
+		uint8_t offset = 0;
+		uint8_t waitErased = eNum;
+		while( (hReturn == CUS_FLASH_OK) && waitErased-- )
+		{
+			const Cus_Flash_Sector_t *currentSec = Cus_Flash_GetSectorbyIndex(pSector->secIndex + offset++);
+			hReturn = Cus_Flash_EraseSector(currentSec);
+		}
+		if ( (waitErased != 0) && (hReturn != CUS_FLASH_OK) )
+		{
+			/* Something error happend while erasing.Return with Successfully erased count. */
+			return (eNum - waitErased);
+		}
+
+		/* Successfully erased all sectors. Normal back. */
+		return eNum;
 	}
 
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */

@@ -6,14 +6,14 @@
     Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage )
     {
         UNUSED(ppPage);
-        for( ; ; );
+        __nop();
     }
 
     __weak void 
     Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage )
     {
         UNUSED(pPage);
-        for( ; ; );
+        __nop();
     }
 #endif 
 
@@ -27,6 +27,13 @@
         UNUSED(ACR_ConfigWord);
     }
 
+
+    __weak void 
+    Cus_FLASH_EraseSectorFailed_Hook( const Cus_Flash_Sector_t *pSector )
+    {
+        UNUSED(pSector);
+    }
+
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 
 
@@ -34,7 +41,7 @@
 __weak void 
 Cus_FLASH_UnlockFailed_Hook( void )
 {
-	for( ; ; );
+    __nop();
 }
 
 
@@ -42,7 +49,7 @@ Cus_FLASH_UnlockFailed_Hook( void )
 __weak void 
 Cus_FLASH_LockFailed_Hook( void )
 {
-	for( ; ; );
+    __nop();
 }
 
 
@@ -50,7 +57,7 @@ Cus_FLASH_LockFailed_Hook( void )
 __weak void 
 Cus_FLASH_EraseFailed_Hook( void )
 {
-	for( ; ; );
+    __nop();
 }
 
 
@@ -60,7 +67,7 @@ Cus_FLASH_VerifyBufferFailed_Hook( uint32_t StartAddress, uint8_t *pData, uint32
 {
 	UNUSED(pData);
 	UNUSED(BufferSize);
-	for( ; ; );
+    __nop();
 }
 
 
