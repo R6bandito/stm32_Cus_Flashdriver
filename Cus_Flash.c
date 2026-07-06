@@ -37,11 +37,30 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	void Cus_Flash_EnableART( void );
 	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
 	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
+	Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
+
+	static Cus_Flash_State_t Cus_Flash_WaitBusy( uint32_t timeout_ms );
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 /* ****************************************************** */
 
 
 /* ****************************************************** */
+#if (CUS_FLASH_USE_MANAGER)
+typedef struct 
+{
+	/*  */
+	uint32_t Magic;
+	uint32_t Size;
+	uint32_t StartAddr;
+	uint16_t  Type;
+	uint16_t  validFlag;
+	char Desc[16];
+
+} desc_t;
+
+#endif /* CUS_FLASH_USE_MANAGER */
+
+
 #if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
 	static const Cus_Flash_Sector_t SectorTable[] = 
 	{
@@ -611,6 +630,27 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 
 #if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
 
+	static Cus_Flash_State_t 
+	Cus_Flash_WaitBusy( uint32_t timeout_ms )
+	{
+		uint32_t timeout = Cus_Flash_GetSpinCount(timeout_ms);
+		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout ) { __nop(); }
+
+		static const uint32_t errorMask = FLASH_SR_PGAERR_Msk | FLASH_SR_PGPERR_Msk | FLASH_SR_PGSERR_Msk | FLASH_SR_WRPERR_Msk;
+		if ( FLASH->SR & FLASH_SR_BSY_Msk ) return CUS_FLASH_TIMEOUT;
+
+		if ( FLASH->SR & errorMask ) 
+		{
+			/* Clear error flag and return. */
+			FLASH->SR |= errorMask;
+			return CUS_FLASH_ERROR;
+		}
+
+		return CUS_FLASH_OK;
+	}
+
+
+
 	const Cus_Flash_Sector_t *
 	Cus_Flash_GetSectorbyAddr( uint32_t Addr )
 	{
@@ -801,6 +841,184 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 
 		/* Successfully erased all sectors. Normal back. */
 		return eNum;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest )
+	{
+		if ( !pRequest )	return CUS_FLASH_PARAMETER;
+
+		if ( ((pRequest->pSector->secStartAddr + pRequest->Offset) & 0x03) != 0 )
+		{
+			/* StartAddr + Offset must aligned to 4 Bytes. */
+			return CUS_FLASH_ALIGNED_ERR;
+		}
+
+		uint32_t timeout = Cus_Flash_GetSpinCount(300);
+		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+		{
+			__nop();
+		}
+		if ( !timeout )
+		{
+			/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
+			return CUS_FLASH_BUSY;
+		}
+
+		/* Check. Whether the program region valid to be written. */
+		uint32_t waitCheckBytes;
+		#if (CUS_FLASH_USE_MANAGER)
+			waitCheckBytes = sizeof(desc_t) + pRequest->bufSize;
+		#else 
+			waitCheckBytes = pRequest->bufSize;
+		#endif /* CUS_FLASH_USE_MANAGER */
+
+		uint8_t *pData = (uint8_t *)(pRequest->pSector->secStartAddr + pRequest->Offset);
+		if ( waitCheckBytes <= CUS_CHECK_THRESHOLD )
+		{
+			/* Full exhaustive check for small block size (≤ CUS_CHECK_THRESHOLD). */
+			for( uint32_t count = 0; count < waitCheckBytes; count++ )
+			{
+				if ( pData[count] != 0xFF )
+				{
+					/* 
+						Target area not fully erased (non-0xFF detected). Reject write to prevent data corruption.
+						Notify upper layer, and return. 
+					*/
+					goto NOT_ERASED;
+				}
+			}
+		}
+		else 
+		{
+			/* Sparse spot check: sample first 4B, last 4B, and every 128B in between. */
+			/* First 4 Bits Check. */
+			for ( uint8_t i = 0; i < 4; i++ )
+				if ( pData[i] != 0xFF )  goto NOT_ERASED;		
+			
+			/* Middle Spot Check. */
+			for ( uint32_t offset = 128; offset < waitCheckBytes - 4; offset += CUS_CHECK_INTERVAL )
+				if ( pData[offset] != 0xFF ) goto NOT_ERASED;
+
+			/* Last 4 Bits Check. */
+			for ( int i = 0; i < 4; i++ )
+        		if ( pData[waitCheckBytes - 4 + i] != 0xFF ) goto NOT_ERASED;
+		}
+
+		Cus_Flash_Unlock();
+
+		/* Set FLASH_CR PG bit. */
+		FLASH->CR |= FLASH_CR_PG_Msk;
+
+		/* Enable x32 Program. PSIZE=0b10 */
+		FLASH->CR = ((FLASH->CR & ~FLASH_CR_PSIZE_Msk) | (0x02UL << FLASH_CR_PSIZE_Pos));
+
+		uint32_t dataBlockStartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset);
+		#if (CUS_FLASH_USE_MANAGER)
+			/* Manager feature. Prepare the data control block. */
+			desc_t title = { 0 };
+			title.Magic = CUS_MANAGER_MAGIC;
+			title.validFlag = 0;	/* 0=Data Valid. */
+			title.StartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset + sizeof(desc_t));
+			title.Size = pRequest->bufSize;
+			title.Type = pRequest->dataType;
+			memcpy(title.Desc, pRequest->desc, sizeof(pRequest->desc));
+
+			/* Update data block write addr. */
+			dataBlockStartAddr = title.StartAddr;
+
+			/* Write the control block. (Word) */
+			uint32_t *src_ptr = (uint32_t *)&title;
+			volatile uint32_t *desc_ptr = (volatile uint32_t *)(pRequest->pSector->secStartAddr + pRequest->Offset);
+			uint8_t wordCount = sizeof(desc_t) / 4;
+			
+			for( uint8_t index = 0; index < wordCount; index++ )
+			{
+				desc_ptr[index] = src_ptr[index];
+
+				/* Wait BSY clear and check Status Register. */
+				if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+			}
+
+			/* Verify the control block if be written correctly. */
+			if ( !Cus_Flash_VerifyBuffer((pRequest->pSector->secStartAddr + pRequest->Offset), (uint8_t *)src_ptr, sizeof(desc_t)) )
+				goto VERIFY_ERR;
+		#endif /* CUS_FLASH_USE_MANAGER */
+
+		uint16_t dataCount_W = 0;
+		uint8_t remainWaitToBeHandle = 0;
+		if ( (pRequest->bufSize % 4) == 0 )
+		{
+			/* Buffer size is word-aligned. No tail bytes (1~3) need to be processed. */
+			dataCount_W = pRequest->bufSize / 4;
+		}
+		else 
+		{
+			/* Buffer size is not word-aligned. Tail bytes (1~3) need to be handled. */
+			dataCount_W = ((pRequest->bufSize / 4) + 1);
+			remainWaitToBeHandle = 1;
+		}
+
+		/* Write user data. */
+		volatile uint32_t *user = (volatile uint32_t *)dataBlockStartAddr;
+		for( uint16_t index = 0; index < dataCount_W; index++ )
+		{
+			if ( remainWaitToBeHandle && (index == (dataCount_W - 1)) )
+			{
+				/* Handle the last 1 ~ 3 Bytes. */
+				uint8_t remainByteNum = (pRequest->bufSize % 4);
+				uint8_t remainStartIndex = (pRequest->bufSize - remainByteNum);
+				uint32_t LastWord = 0;
+				switch (remainByteNum)
+				{
+					case 1: memcpy(&LastWord, &pRequest->pBuffer[remainStartIndex], 1); LastWord |= 0xFFFFFF00UL; break;
+					case 2: memcpy(&LastWord, &pRequest->pBuffer[remainStartIndex], 2); LastWord |= 0xFFFF0000UL; break;
+					case 3: memcpy(&LastWord, &pRequest->pBuffer[remainStartIndex], 3); LastWord |= 0xFF000000UL; break;
+
+					default:  goto PG_ERR;
+				}
+
+				/* Write the last word. */
+				*user = LastWord;
+
+				/* Wait BSY clear and check Status Register. */
+				if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+
+				goto SUCCESS;
+			}
+
+			uint32_t word;
+			memcpy(&word, &pRequest->pBuffer[index * 4], 4);
+			*user = word;
+
+			/* Wait BSY clear and check Status Register. */
+			if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+
+			user++;
+		}
+
+	SUCCESS:	
+		/* Verify The data block. */
+		if ( !Cus_Flash_VerifyBuffer(dataBlockStartAddr, pRequest->pBuffer, pRequest->bufSize) )	goto VERIFY_ERR;
+
+		Cus_Flash_Lock();
+		return CUS_FLASH_OK;
+
+	NOT_ERASED:
+		Cus_FLASH_WriteSectorFailed_Hook(pRequest->pSector);
+		return CUS_FLASH_NOT_ERASED;
+
+	PG_ERR:
+		Cus_Flash_Lock();
+		Cus_FLASH_WriteSectorFailed_Hook(pRequest->pSector);
+		return CUS_FLASH_ERROR;
+
+	VERIFY_ERR:
+		Cus_Flash_Lock();
+		Cus_FLASH_VerifyBufferFailed_Hook(dataBlockStartAddr, pRequest->pBuffer, pRequest->bufSize);
+		return CUS_FLASH_VERIFY_ERR;
 	}
 
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */

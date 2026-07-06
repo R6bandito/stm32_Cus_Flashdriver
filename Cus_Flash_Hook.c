@@ -34,6 +34,13 @@
         UNUSED(pSector);
     }
 
+
+    __weak void 
+    Cus_FLASH_WriteSectorFailed_Hook( const Cus_Flash_Sector_t *pSector )
+    {
+        UNUSED(pSector);
+    }
+
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 
 

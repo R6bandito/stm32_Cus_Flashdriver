@@ -10,6 +10,13 @@
 			#define DEVICE_FLASH_TOTAL_SIZE		(256UL * 1024UL)
 			#warning "Please change DEVICE_FLASH_TOTAL_SIZE to your acutal value. And the format like this: (e.g., 2048*1024 for F42x/F43x)!"
 		#endif /* DEVICE_STM32F4xx */
+
+	#define CUS_FLASH_USE_MANAGER				(0)
+		#if (CUS_FLASH_USE_MANAGER)
+			#define CUS_MANAGER_MAGIC			(0xBEEFFEEBUL)
+		#endif /* CUS_FLASH_USE_MANAGER */
+
+	#define CUS_MEM_ALIGNED						(4UL)
 /* ****************************************************** */
 
 
@@ -37,7 +44,10 @@ typedef enum Cus_Flash_State
   CUS_FLASH_ERROR,
   CUS_FLASH_PARAMETER,
   CUS_FLASH_PROGRAM_WRPRTERR,
-  CUS_FLASH_PROGRAM_PGERR
+  CUS_FLASH_PROGRAM_PGERR,
+  CUS_FLASH_ALIGNED_ERR,
+  CUS_FLASH_NOT_ERASED,
+  CUS_FLASH_VERIFY_ERR,
 
 } Cus_Flash_State_t;
 
@@ -62,6 +72,9 @@ typedef enum Cus_Flash_State
 	#define CUS_FLASH_SECTOR_16K		(16UL * 1024UL)
 	#define CUS_FLASH_SECTOR_64K		(64UL * 1024UL)
 	#define CUS_FLASH_SECTOR_128K		(128UL * 1024UL)
+
+	#define CUS_CHECK_THRESHOLD			(512UL)
+	#define CUS_CHECK_INTERVAL			(128UL)
 #endif // DEVICE_STM32F4xx
 
 #define FLASH_KEYR_KEY1               	(0x45670123UL)
@@ -71,6 +84,21 @@ typedef enum Cus_Flash_State
 #define FLASH_END_ADDR                	(FLASH_BASE + FLASH_SIZE_BYTES)
 /* ******************************************************* */
 
+
+/* ----------------------------------------------------------- */
+#if (CUS_FLASH_USE_MANAGER)
+typedef struct 
+{
+	/*  */
+	uint16_t dataType;
+	uint32_t dataSize;
+	uint32_t dataStartAddr;
+	char dataDesc[16];
+
+} Cus_Flash_desc_t;
+
+#endif /* CUS_FLASH_USE_MANAGER */
+/* ----------------------------------------------------------- */
 
 
 /* ----------------------------------------------------------- */
@@ -128,6 +156,11 @@ typedef enum Cus_Flash_State
 		uint32_t bufSize;
 		uint32_t Offset;
 
+		#if (CUS_FLASH_USE_MANAGER)
+		char desc[16];
+		uint16_t dataType;
+		#endif /* CUS_FLASH_USE_MANAGER */
+
 	} Cus_Flash_SecReq_t;
 
 	const Cus_Flash_Sector_t *Cus_Flash_GetSectorbyAddr( uint32_t Addr );
@@ -139,9 +172,11 @@ typedef enum Cus_Flash_State
 	void Cus_Flash_EnableART( void );
 	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
 	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
+	Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
 
 	__weak void Cus_FLASH_ARTEnableFailed_Hook( uint32_t ACR_ConfigWord );
 	__weak void Cus_FLASH_EraseSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
+	__weak void Cus_FLASH_WriteSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
 /* ----------------------------------------------------------- */
 
