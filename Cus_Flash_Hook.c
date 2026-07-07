@@ -45,6 +45,18 @@
 
 
 
+#if (CUS_FLASH_USE_MANAGER)
+
+    __weak void 
+    Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords )
+    {
+        UNUSED(TotalRecords);
+    }
+
+#endif /* #if (CUS_FLASH_USE_MANAGER) */
+
+
+
 __weak void 
 Cus_FLASH_UnlockFailed_Hook( void )
 {

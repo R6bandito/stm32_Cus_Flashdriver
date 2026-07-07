@@ -11,9 +11,10 @@
 			#warning "Please change DEVICE_FLASH_TOTAL_SIZE to your acutal value. And the format like this: (e.g., 2048*1024 for F42x/F43x)!"
 		#endif /* DEVICE_STM32F4xx */
 
-	#define CUS_FLASH_USE_MANAGER				(0)
+	#define CUS_FLASH_USE_MANAGER				(1)
 		#if (CUS_FLASH_USE_MANAGER)
 			#define CUS_MANAGER_MAGIC			(0xBEEFFEEBUL)
+			#define FLASH_MGR_MAX_RECORDS		(64)	/* Plz Adjust this value to match your actual situation. */
 		#endif /* CUS_FLASH_USE_MANAGER */
 
 	#define CUS_MEM_ALIGNED						(4UL)
@@ -48,6 +49,7 @@ typedef enum Cus_Flash_State
   CUS_FLASH_ALIGNED_ERR,
   CUS_FLASH_NOT_ERASED,
   CUS_FLASH_VERIFY_ERR,
+  CUS_FLASH_OVFLW_ERR,
 
 } Cus_Flash_State_t;
 
@@ -170,14 +172,26 @@ typedef struct
 	uint32_t Cus_Flash_GetSectorSize( uint8_t Index );
 
 	void Cus_Flash_EnableART( void );
-	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
-	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
-	Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
+
+	#if (!CUS_FLASH_USE_MANAGER)
+		Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
+		uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
+		Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
+		Cus_Flash_State_t Cus_Flash_ReadSector( const Cus_Flash_SecReq_t *pReq );
+	#endif /* !CUS_FLASH_USE_MANAGER */
 
 	__weak void Cus_FLASH_ARTEnableFailed_Hook( uint32_t ACR_ConfigWord );
 	__weak void Cus_FLASH_EraseSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
 	__weak void Cus_FLASH_WriteSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
+
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
+
+
+#if (CUS_FLASH_USE_MANAGER)
+	Cus_Flash_State_t Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr );
+
+	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
+#endif /* CUS_FLASH_USE_MANAGER */
 /* ----------------------------------------------------------- */
 
 

@@ -38,27 +38,53 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
 	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
 	Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
+	Cus_Flash_State_t Cus_Flash_ReadSector( const Cus_Flash_SecReq_t *pReq );
 
 	static Cus_Flash_State_t Cus_Flash_WaitBusy( uint32_t timeout_ms );
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
+
+
+#if (CUS_FLASH_USE_MANAGER)
+	Cus_Flash_State_t Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr );
+
+#endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
 
 /* ****************************************************** */
 #if (CUS_FLASH_USE_MANAGER)
-typedef struct 
-{
-	/*  */
-	uint32_t Magic;
-	uint32_t Size;
-	uint32_t StartAddr;
-	uint16_t  Type;
-	uint16_t  validFlag;
-	char Desc[16];
 
-} desc_t;
+	typedef struct 
+	{
+		/*  */
+		uint32_t  Magic;
+		uint32_t  Size;
+		uint32_t  dataStartAddr;
+		uint16_t  Type;
+		uint16_t  validFlag;
+		char Desc[16];
+
+	} desc_t;
+
+
+	typedef struct 
+	{
+		uint32_t msgStartAddr;
+		uint32_t msgSize;
+		uint16_t msgType;
+		uint16_t msgFlag;
+		char msgDetail[16];
+		
+	} FlashMgr_Record_t;
+
+	static FlashMgr_Record_t gs_records[FLASH_MGR_MAX_RECORDS];
+	static uint16_t gs_recordCount = 0;
+	static uint32_t gs_lowestFreeAddr = 0;
+	static uint32_t gs_StartAddr = 0;
+	static uint32_t gs_EndAddr = 0;
 
 #endif /* CUS_FLASH_USE_MANAGER */
+/* ****************************************************** */
 
 
 #if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
@@ -776,7 +802,7 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 			case 12:	snbVal = pSector->secIndex;	break;
 
 			/* Physical sectors 12~23 map to SNB values 16~27 (offset +4), because SNB 12~15 are reserved. */ 
-			case 24:	snbVal = (pSector->secIndex >= 12) ? (pSector->secIndex + 4) : (pSector->secIndex);
+			case 24:	snbVal = (pSector->secIndex >= 12) ? (pSector->secIndex + 4) : (pSector->secIndex);	  break;
 
 			/* Unexpected sector index. Notify upper layer via hook and return. */
 			default:	goto ERROR;
@@ -848,13 +874,21 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_Flash_State_t 
 	Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest )
 	{
-		if ( !pRequest )	return CUS_FLASH_PARAMETER;
+		if ( !pRequest || !pRequest->pBuffer || !pRequest->bufSize || !pRequest->pSector )	return CUS_FLASH_PARAMETER;
 
 		if ( ((pRequest->pSector->secStartAddr + pRequest->Offset) & 0x03) != 0 )
 		{
 			/* StartAddr + Offset must aligned to 4 Bytes. */
 			return CUS_FLASH_ALIGNED_ERR;
 		}
+
+		/* Verify that write size does not exceed the current sector boundary.  */
+		#if (CUS_FLASH_USE_MANAGER)
+			if ( (pRequest->Offset + sizeof(desc_t) + pRequest->bufSize) > pRequest->pSector->secSize )
+		#else
+			if ( (pRequest->Offset + pRequest->bufSize) > pRequest->pSector->secSize )
+		#endif
+		return CUS_FLASH_PARAMETER;
 
 		uint32_t timeout = Cus_Flash_GetSpinCount(300);
 		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
@@ -920,14 +954,14 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 			/* Manager feature. Prepare the data control block. */
 			desc_t title = { 0 };
 			title.Magic = CUS_MANAGER_MAGIC;
-			title.validFlag = 0;	/* 0=Data Valid. */
-			title.StartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset + sizeof(desc_t));
+			title.validFlag = 0xFFFF;	/* FFFF=Data Valid. */
+			title.dataStartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset + sizeof(desc_t));
 			title.Size = pRequest->bufSize;
 			title.Type = pRequest->dataType;
 			memcpy(title.Desc, pRequest->desc, sizeof(pRequest->desc));
 
 			/* Update data block write addr. */
-			dataBlockStartAddr = title.StartAddr;
+			dataBlockStartAddr = title.dataStartAddr;
 
 			/* Write the control block. (Word) */
 			uint32_t *src_ptr = (uint32_t *)&title;
@@ -1021,7 +1055,167 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		return CUS_FLASH_VERIFY_ERR;
 	}
 
+
+
+	Cus_Flash_State_t 
+	Cus_Flash_ReadSector( const Cus_Flash_SecReq_t *pReq )
+	{
+		if ( !pReq || !pReq->pBuffer || !pReq->bufSize || !pReq->pSector )	return CUS_FLASH_PARAMETER;
+
+		/* Verify that read size does not exceed the current sector boundary.  */
+		if ( (pReq->Offset + pReq->bufSize) > pReq->pSector->secSize )
+			return CUS_FLASH_PARAMETER;
+
+		/* Get the Read Start Addr and Recv Start. */
+		uint32_t *readStart = (uint32_t *)(pReq->pSector->secStartAddr + pReq->Offset);
+		uint32_t *recvStart = (uint32_t *)pReq->pBuffer;
+
+		/* Get the Read Word nums. */
+		uint32_t remainBytes = (pReq->bufSize % 4);
+		uint32_t wordNum = (pReq->bufSize / 4);
+		uint8_t remainNeedBeHandled = 0;
+		if ( remainBytes )
+			remainNeedBeHandled = 1;
+
+		/* Start read data in specific region. */
+		for( uint32_t Wsize = 0; Wsize < wordNum; Wsize++ )
+			*recvStart++ = *readStart++;
+
+		/* If the Remains need to be processed. */
+		if ( remainNeedBeHandled )
+		{
+			memcpy(recvStart, readStart, remainBytes);
+		}
+
+		return CUS_FLASH_OK;
+	}
+
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
+
+
+#if (CUS_FLASH_USE_MANAGER)
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr )
+	{
+		/* Ensure that the parameter is Valid. */
+		if ( start_addr < FLASH_BASE || start_addr > FLASH_END_ADDR )
+			return CUS_FLASH_PARAMETER;
+		
+		if ( end_addr < FLASH_BASE || end_addr > FLASH_END_ADDR )
+			return CUS_FLASH_PARAMETER;
+
+		/* Ensure the Addr is aligned to 4 Bytes. */
+		if ( (start_addr & 0x03) || (end_addr & 0x03) )
+			return CUS_FLASH_ALIGNED_ERR;
+		
+		/* Init the gs_recordCount and gs_lowestFreeAddr. */
+		gs_recordCount = 0;
+		gs_lowestFreeAddr = 0;
+
+		/* Scan the entire managed area for valid data. */
+		/* Start address and size are 4-byte aligned. Access as 32-bit words (size/4), no tail bytes. */
+		uint32_t scanCount_W = ((end_addr - start_addr) / 4);
+		uint32_t *flash = (uint32_t *)start_addr;
+		uint16_t totalCnt = FLASH_MGR_MAX_RECORDS;
+		uint8_t flash_step = (sizeof(desc_t) / 4);
+		#define UINT_TO_DESC	((desc_t *)flash)	
+
+		for( uint32_t index = 0; index < scanCount_W; index++ )
+		{
+			if ( (*flash == CUS_MANAGER_MAGIC) && (UINT_TO_DESC->validFlag) )
+			{
+				if ( gs_recordCount >= FLASH_MGR_MAX_RECORDS )
+				{
+					/* Error. Buffer Overflow. */
+					totalCnt++;
+					flash += flash_step;
+					index += (flash_step - 1);
+					continue;
+				}
+
+				/* Find one valid record. add to Recored Poll(gs_records). */
+				FlashMgr_Record_t record;
+				record.msgStartAddr = UINT_TO_DESC->dataStartAddr;
+				record.msgSize = UINT_TO_DESC->Size;
+				record.msgType = UINT_TO_DESC->Type;
+				record.msgFlag = 1;
+				memcpy(record.msgDetail, UINT_TO_DESC->Desc, sizeof(record.msgDetail));
+
+				memcpy(&gs_records[gs_recordCount++], &record, sizeof(FlashMgr_Record_t));
+
+				if ( (uint32_t)flash + (sizeof(desc_t) + UINT_TO_DESC->Size) > end_addr )
+				{
+					/* Parsed data would cause out-of-bounds flash access. Return error. */
+					return CUS_FLASH_ERROR;
+				}
+
+				uint32_t userWords = ((UINT_TO_DESC->Size + 3) / 4);
+				flash += flash_step + userWords;
+
+				/*
+					Note: Due to zero-based index increment in the for loop, 
+					the valid offset within this step is (flash_step - 1), not flash_step. 
+				*/
+				index += (flash_step - 1) + userWords;	
+
+				continue;
+			}
+
+			if ( (*flash == 0xFFFFFFFFUL) )
+			{
+				/* Possibly the start address of the free area. Verify further. */
+				uint32_t storeAddr = (uint32_t)flash;
+				uint32_t *pOperation = flash;
+				bool isFree = true;
+				for( uint8_t cnt = 0; cnt < ((sizeof(desc_t) / 4) + 4); cnt++ )
+				{
+					/* Candidate free area found. Verify that the following (sizeof(desc_t) / 4 + 4) words are all 0xFFFF. */
+					/* In order to ensure that the free area has enough capacity for one control header and at least 4 words of user data. */
+					if ( *pOperation != 0xFFFFFFFFUL )	
+					{
+						/* Detected non-0xFF. Continue. */
+						isFree = false;
+						break;
+					}
+
+					pOperation++;
+				}
+
+				/* Free area found. Store address and return. */
+				if ( isFree )
+				{
+					gs_lowestFreeAddr = storeAddr;
+					break;
+				}
+			}
+
+			/* Neither free area nor valid record. Treat as invalid data and skip. */
+			flash++;
+		}
+
+		if ( totalCnt > FLASH_MGR_MAX_RECORDS )
+		{
+			/* Inform the upper layer that the Recored Poll overflow. */
+			#undef UINT_TO_DESC;
+			Cus_FLASH_MGRBufOVFL_Hook(totalCnt);
+			return CUS_FLASH_OVFLW_ERR;
+		}
+
+		if ( !gs_lowestFreeAddr )
+		{
+			/* No free area found after full scan. Mark as full. */
+			gs_lowestFreeAddr = end_addr;
+		}
+
+		gs_StartAddr = start_addr;
+		gs_EndAddr = end_addr;
+
+		#undef UINT_TO_DESC;
+		return CUS_FLASH_OK;
+	}
+
+#endif /* CUS_FLASH_USE_MANAGER */
 
 
 
