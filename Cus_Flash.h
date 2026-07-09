@@ -14,7 +14,10 @@
 	#define CUS_FLASH_USE_MANAGER				(1)
 		#if (CUS_FLASH_USE_MANAGER)
 			#define CUS_MANAGER_MAGIC			(0xBEEFFEEBUL)
+			#define CUS_MANAGER_FLAG_VALID		(0xFFFFUL)
+			#define CUS_MANAGER_FLAG_INVALID	(0x0000UL)
 			#define FLASH_MGR_MAX_RECORDS		(64)	/* Plz Adjust this value to match your actual situation. */
+			#define FLASH_MGR_MAX_INSTANCES		(4)
 		#endif /* CUS_FLASH_USE_MANAGER */
 
 	#define CUS_MEM_ALIGNED						(4UL)
@@ -50,6 +53,9 @@ typedef enum Cus_Flash_State
   CUS_FLASH_NOT_ERASED,
   CUS_FLASH_VERIFY_ERR,
   CUS_FLASH_OVFLW_ERR,
+  CUS_FLASH_NOSPACE_ERR,
+  CUS_FLASH_NOT_FOUND,
+  CUS_FLASH_OVERLAP_ERR,
 
 } Cus_Flash_State_t;
 
@@ -89,15 +95,20 @@ typedef enum Cus_Flash_State
 
 /* ----------------------------------------------------------- */
 #if (CUS_FLASH_USE_MANAGER)
-typedef struct 
-{
-	/*  */
-	uint16_t dataType;
-	uint32_t dataSize;
-	uint32_t dataStartAddr;
-	char dataDesc[16];
 
-} Cus_Flash_desc_t;
+	typedef struct 
+	{
+		/**
+			* External representation of a stored record's metadata.
+			* Returned by Manager query APIs for the upper layer to inspect.
+		 */
+		uint16_t dataType;			/**< Application-defined data type tag. */
+		uint32_t dataSize;			/**< Size of the user data block in bytes. */
+		uint32_t dataStartAddr;		/**< Absolute Flash address where the user data begins. */
+		uint32_t dataIndexInPoll;	/**< The Record index in the gs_records table. */
+		char dataDesc[16];			/**< Human-readable description string. */
+
+	} Cus_Flash_desc_t;
 
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ----------------------------------------------------------- */
@@ -140,27 +151,34 @@ typedef struct
 
 
 #if defined(FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx)
+
 	typedef struct 
 	{
-		/*  */
-		uint8_t secIndex;
-		uint32_t secStartAddr;
-		uint32_t secSize;
+		/*
+			* Describes a single Flash sector: its index, base address, and size.
+			* Used by the sector-mode driver for erase and address lookup.
+		*/
+		uint8_t secIndex;   	/**< Zero-based hardware sector number (used for SNB register). */
+		uint32_t secStartAddr;	/**< Absolute start address of this sector in Flash. */
+		uint32_t secSize;		/**< Total size of this sector in bytes. */
 
 	} Cus_Flash_Sector_t;
 
-
 	typedef struct 
 	{
-		/*  */
-		const Cus_Flash_Sector_t *pSector;
-		uint8_t *pBuffer;
-		uint32_t bufSize;
-		uint32_t Offset;
+		/**
+			 * Unified request packet for sector-mode read and write operations.
+			 * When Manager is enabled, optional desc/dataType fields are included
+			 * for automatic header generation.
+		 */
+		const Cus_Flash_Sector_t *pSector;		/**< Target sector (The Sectors that you want to handle). */
+		uint8_t *pBuffer;						/**< User data buffer for read destination or write source. */
+		uint32_t bufSize;						/**< Size of the user data in bytes. */
+		uint32_t Offset;						/**< Byte offset from sector start to begin the operation. */
 
 		#if (CUS_FLASH_USE_MANAGER)
-		char desc[16];
-		uint16_t dataType;
+		char desc[16];							/**< Human-readable description stored in the on-flash header. */
+		uint16_t dataType;						/**< Application-defined data type tag. */
 		#endif /* CUS_FLASH_USE_MANAGER */
 
 	} Cus_Flash_SecReq_t;
@@ -171,11 +189,12 @@ typedef struct
 	uint8_t Cus_Flash_GetRemainSectors( uint8_t Index );
 	uint32_t Cus_Flash_GetSectorSize( uint8_t Index );
 
+	Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
+	uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
+
 	void Cus_Flash_EnableART( void );
 
-	#if (!CUS_FLASH_USE_MANAGER)
-		Cus_Flash_State_t Cus_Flash_EraseSector( const Cus_Flash_Sector_t *pSector );
-		uint8_t Cus_Flash_EraseSectors( const Cus_Flash_Sector_t *pSector, uint8_t eNum );
+	#if (!CUS_FLASH_USE_MANAGER)		
 		Cus_Flash_State_t Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest );
 		Cus_Flash_State_t Cus_Flash_ReadSector( const Cus_Flash_SecReq_t *pReq );
 	#endif /* !CUS_FLASH_USE_MANAGER */
@@ -184,13 +203,61 @@ typedef struct
 	__weak void Cus_FLASH_EraseSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
 	__weak void Cus_FLASH_WriteSectorFailed_Hook( const Cus_Flash_Sector_t *pSector );
 
-#endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
+#endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */ 
 
 
 #if (CUS_FLASH_USE_MANAGER)
-	Cus_Flash_State_t Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr );
+
+	typedef struct 
+	{
+		/**
+			* Request packet for appending a new record via the Manager layer.
+			* The Manager handles header generation and free-space placement automatically.
+		 */
+		uint32_t DataType;		/**< Application-defined data type tag stored in the header. */
+		char DataDesc[16];		/**< Human-readable description stored in the header. */
+		uint8_t *DataBuff;		/**< Pointer to the user data to be written. */
+		uint32_t DataSize;		/**< Size of the user data in bytes. */
+
+	} Cus_FlashMgr_Req_t;
+
+
+	typedef struct 
+	{
+		/**
+			* RAM-resident index entry built during Init scanning.
+			* One entry per valid on-flash record; used for all Manager queries and deletions.
+		 */
+		uint32_t msgStartAddr;		/**< Absolute Flash address where the user data begins. */
+		uint32_t msgSize;			/**< Size of the user data in bytes. */
+		uint16_t msgType;			/**< Application-defined data type tag. */
+		char msgDetail[16];			/**< Human-readable description string. */
+		
+	} FlashMgr_Record_t;
+
+
+	typedef struct 
+	{
+		uint32_t mgrStartAddr;
+		uint32_t mgrEndAddr;
+		uint32_t mgrLowestFreeAddr;
+		uint32_t mgrRecordCount;
+		FlashMgr_Record_t mgrRecords[FLASH_MGR_MAX_RECORDS];
+
+	} FlashMgr_Instance_t;
+	
+
+	Cus_Flash_State_t Cus_FlashMgr_Init( FlashMgr_Instance_t *instance, uint32_t start_addr, uint32_t end_addr );
+	Cus_Flash_State_t Cus_FlashMgr_Append( FlashMgr_Instance_t *instance, const Cus_FlashMgr_Req_t *pReq );
+	Cus_Flash_State_t Cus_FlashMgr_GetRecordByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_desc_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteByIndex( FlashMgr_Instance_t *instance, uint32_t recordIndex );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc );
+	Cus_Flash_State_t Cus_FlashMgr_GetRecordCount( FlashMgr_Instance_t *instance, uint16_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_GetFreeSpace( FlashMgr_Instance_t *instance, uint32_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
 
 	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
+
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ----------------------------------------------------------- */
 

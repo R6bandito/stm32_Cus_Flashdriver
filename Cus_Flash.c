@@ -45,8 +45,14 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 
 
 #if (CUS_FLASH_USE_MANAGER)
-	Cus_Flash_State_t Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr );
-
+	Cus_Flash_State_t Cus_FlashMgr_Init( FlashMgr_Instance_t *instance, uint32_t start_addr, uint32_t end_addr );
+	Cus_Flash_State_t Cus_FlashMgr_Append( FlashMgr_Instance_t *instance, const Cus_FlashMgr_Req_t *pReq );
+	Cus_Flash_State_t Cus_FlashMgr_GetRecordByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_desc_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_GetRecordCount( FlashMgr_Instance_t *instance, uint16_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_GetFreeSpace( FlashMgr_Instance_t *instance, uint32_t *pOut );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteByIndex( FlashMgr_Instance_t *instance, uint32_t recordIndex );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc );
+	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
@@ -56,32 +62,22 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 
 	typedef struct 
 	{
-		/*  */
-		uint32_t  Magic;
-		uint32_t  Size;
-		uint32_t  dataStartAddr;
-		uint16_t  Type;
-		uint16_t  validFlag;
-		char Desc[16];
+		/**
+			 * On-flash layout of a record descriptor header.
+			 * Written verbatim before each user data block by WriteSector when Manager is active.
+			 * Total size is 32 bytes (8 words), word-aligned by design.
+		 */
+		uint32_t  Magic;			/**< Magic number (CUS_MANAGER_MAGIC) identifying a valid record. */
+		uint32_t  Size;				/**< Size of the following user data block in bytes. */
+		uint32_t  dataStartAddr;	/**< Absolute Flash address where the user data begins. */
+		uint16_t  Type;				/**< Application-defined data type tag. */
+		uint16_t  validFlag;		/**< Validity flag: 0xFFFF = valid, any 1→0 transition marks deletion. */
+		char Desc[16];				/**< Human-readable description string (null-padded). */
 
 	} desc_t;
 
-
-	typedef struct 
-	{
-		uint32_t msgStartAddr;
-		uint32_t msgSize;
-		uint16_t msgType;
-		uint16_t msgFlag;
-		char msgDetail[16];
-		
-	} FlashMgr_Record_t;
-
-	static FlashMgr_Record_t gs_records[FLASH_MGR_MAX_RECORDS];
-	static uint16_t gs_recordCount = 0;
-	static uint32_t gs_lowestFreeAddr = 0;
-	static uint32_t gs_StartAddr = 0;
-	static uint32_t gs_EndAddr = 0;
+	static FlashMgr_Instance_t *gs_ActivateMgr[FLASH_MGR_MAX_INSTANCES];
+	static uint16_t gs_ActivateCount;
 
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
@@ -874,7 +870,8 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_Flash_State_t 
 	Cus_Flash_WriteSector( const Cus_Flash_SecReq_t *pRequest )
 	{
-		if ( !pRequest || !pRequest->pBuffer || !pRequest->bufSize || !pRequest->pSector )	return CUS_FLASH_PARAMETER;
+		if ( !pRequest || !pRequest->pBuffer || !pRequest->bufSize || !pRequest->pSector )	
+			return CUS_FLASH_PARAMETER;
 
 		if ( ((pRequest->pSector->secStartAddr + pRequest->Offset) & 0x03) != 0 )
 		{
@@ -1060,7 +1057,8 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_Flash_State_t 
 	Cus_Flash_ReadSector( const Cus_Flash_SecReq_t *pReq )
 	{
-		if ( !pReq || !pReq->pBuffer || !pReq->bufSize || !pReq->pSector )	return CUS_FLASH_PARAMETER;
+		if ( !pReq || !pReq->pBuffer || !pReq->bufSize || !pReq->pSector )	
+			return CUS_FLASH_PARAMETER;
 
 		/* Verify that read size does not exceed the current sector boundary.  */
 		if ( (pReq->Offset + pReq->bufSize) > pReq->pSector->secSize )
@@ -1096,10 +1094,14 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 #if (CUS_FLASH_USE_MANAGER)
 
 	Cus_Flash_State_t 
-	Cus_FlashMgr_Init( uint32_t start_addr, uint32_t end_addr )
+	Cus_FlashMgr_Init( FlashMgr_Instance_t *instance, uint32_t start_addr, uint32_t end_addr )
 	{
+		/* Check if the record table is full. */
+		if ( gs_ActivateCount >= FLASH_MGR_MAX_INSTANCES )
+			return CUS_FLASH_OVFLW_ERR;
+
 		/* Ensure that the parameter is Valid. */
-		if ( start_addr < FLASH_BASE || start_addr > FLASH_END_ADDR )
+		if ( start_addr < FLASH_BASE || start_addr > FLASH_END_ADDR || !instance )
 			return CUS_FLASH_PARAMETER;
 		
 		if ( end_addr < FLASH_BASE || end_addr > FLASH_END_ADDR )
@@ -1108,10 +1110,21 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		/* Ensure the Addr is aligned to 4 Bytes. */
 		if ( (start_addr & 0x03) || (end_addr & 0x03) )
 			return CUS_FLASH_ALIGNED_ERR;
+
+		/* Check for overlapping regions in the managed memory area. */
+		for( uint8_t index = 0; index < gs_ActivateCount; index++ )
+		{
+			FlashMgr_Instance_t *other = gs_ActivateMgr[index];
+			if ( (start_addr < other->mgrEndAddr) && (other->mgrStartAddr < end_addr) )
+			{
+				/* Overlapping managed region detected with an existing instance. Return. */
+				return CUS_FLASH_OVERLAP_ERR;
+			}
+		}
 		
 		/* Init the gs_recordCount and gs_lowestFreeAddr. */
-		gs_recordCount = 0;
-		gs_lowestFreeAddr = 0;
+		instance->mgrRecordCount = 0;
+		instance->mgrLowestFreeAddr = 0;
 
 		/* Scan the entire managed area for valid data. */
 		/* Start address and size are 4-byte aligned. Access as 32-bit words (size/4), no tail bytes. */
@@ -1123,9 +1136,9 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 
 		for( uint32_t index = 0; index < scanCount_W; index++ )
 		{
-			if ( (*flash == CUS_MANAGER_MAGIC) && (UINT_TO_DESC->validFlag) )
+			if ( (*flash == CUS_MANAGER_MAGIC) && (UINT_TO_DESC->validFlag != 0xFFFEUL) )
 			{
-				if ( gs_recordCount >= FLASH_MGR_MAX_RECORDS )
+				if ( instance->mgrRecordCount >= FLASH_MGR_MAX_RECORDS )
 				{
 					/* Error. Buffer Overflow. */
 					totalCnt++;
@@ -1139,10 +1152,9 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 				record.msgStartAddr = UINT_TO_DESC->dataStartAddr;
 				record.msgSize = UINT_TO_DESC->Size;
 				record.msgType = UINT_TO_DESC->Type;
-				record.msgFlag = 1;
 				memcpy(record.msgDetail, UINT_TO_DESC->Desc, sizeof(record.msgDetail));
 
-				memcpy(&gs_records[gs_recordCount++], &record, sizeof(FlashMgr_Record_t));
+				memcpy(&instance->mgrRecords[instance->mgrRecordCount++], &record, sizeof(FlashMgr_Record_t));
 
 				if ( (uint32_t)flash + (sizeof(desc_t) + UINT_TO_DESC->Size) > end_addr )
 				{
@@ -1185,7 +1197,7 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 				/* Free area found. Store address and return. */
 				if ( isFree )
 				{
-					gs_lowestFreeAddr = storeAddr;
+					instance->mgrLowestFreeAddr = storeAddr;
 					break;
 				}
 			}
@@ -1197,21 +1209,234 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		if ( totalCnt > FLASH_MGR_MAX_RECORDS )
 		{
 			/* Inform the upper layer that the Recored Poll overflow. */
-			#undef UINT_TO_DESC;
+			#undef UINT_TO_DESC
 			Cus_FLASH_MGRBufOVFL_Hook(totalCnt);
 			return CUS_FLASH_OVFLW_ERR;
 		}
 
-		if ( !gs_lowestFreeAddr )
+		if ( !instance->mgrLowestFreeAddr )
 		{
 			/* No free area found after full scan. Mark as full. */
-			gs_lowestFreeAddr = end_addr;
+			instance->mgrLowestFreeAddr = end_addr;
 		}
 
-		gs_StartAddr = start_addr;
-		gs_EndAddr = end_addr;
+		instance->mgrStartAddr = start_addr;
+		instance->mgrEndAddr = end_addr;
 
-		#undef UINT_TO_DESC;
+		/* Add this instance to gs_ActivateMgr. */
+		gs_ActivateMgr[gs_ActivateCount++] = instance;
+
+		#undef UINT_TO_DESC
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_Append( FlashMgr_Instance_t *instance, const Cus_FlashMgr_Req_t *pReq )
+	{
+		if ( !pReq || !pReq->DataBuff || !pReq->DataSize || !instance )
+			return CUS_FLASH_PARAMETER;
+		
+		/* Check if the FreeSpace is enough. */
+		if ( !instance->mgrLowestFreeAddr || (instance->mgrLowestFreeAddr == instance->mgrEndAddr) )
+			return CUS_FLASH_NOSPACE_ERR;
+
+		/* Check if the Record-Poll have free space. */
+		if ( instance->mgrRecordCount >= FLASH_MGR_MAX_RECORDS )
+			return CUS_FLASH_OVFLW_ERR;
+		
+		#if (DEVICE_STM32F4xx)
+			/* Constract the write request pack. */
+			Cus_Flash_SecReq_t package;
+			package.dataType = (uint16_t)pReq->DataType;
+			package.bufSize = pReq->DataSize;
+			package.pBuffer = pReq->DataBuff;
+			package.Offset = (instance->mgrLowestFreeAddr - instance->mgrStartAddr);
+			memcpy(package.desc, pReq->DataDesc, sizeof(package.desc));
+
+			/* If the device is F4xx serial. Get the Sector. */
+			const Cus_Flash_Sector_t *Sector = Cus_Flash_GetSectorbyAddr(instance->mgrStartAddr);
+			if ( !Sector )
+			{
+				/* Oops! NULL ptr? Return Error. */
+				return CUS_FLASH_ERROR;
+			}
+			package.pSector = Sector;
+
+			/* Append record. */
+			Cus_Flash_State_t hReturn = Cus_Flash_WriteSector(&package);
+			if ( hReturn != CUS_FLASH_OK )
+				return hReturn;
+
+			/* Update the Records Poll. */
+			FlashMgr_Record_t Record = 
+			{
+			 .msgSize = package.bufSize,
+			 .msgStartAddr = (instance->mgrStartAddr + package.Offset + sizeof(desc_t)),
+			 .msgType = package.dataType,
+			 .msgDetail = {0}
+			};
+			memcpy(Record.msgDetail, package.desc, sizeof(Record.msgDetail));
+
+			instance->mgrRecords[instance->mgrRecordCount++] = Record; 
+
+			/* Update the lowestFreeAddr. */
+			instance->mgrLowestFreeAddr += sizeof(desc_t) + package.bufSize;
+			if ( instance->mgrLowestFreeAddr >= instance->mgrEndAddr )
+				instance->mgrLowestFreeAddr = instance->mgrEndAddr;
+
+		#endif /* DEVICE_STM32F4xx */
+
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_GetRecordByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_desc_t *pOut )
+	{
+		if ( !desc || !pOut || !instance )	return CUS_FLASH_PARAMETER;
+
+		/* Match the specified Records. Newest record first. */
+		for( int16_t index = (int16_t)(instance->mgrRecordCount - 1); index >= 0; index-- )
+		{
+			if ( (strncmp(instance->mgrRecords[index].msgDetail, desc, sizeof(instance->mgrRecords[index].msgDetail)) == 0) )
+			{
+				/* Matched the specific Records. Return to user. */
+				Cus_Flash_desc_t user;
+				user.dataType 		 = instance->mgrRecords[index].msgType;
+				user.dataStartAddr 	 = instance->mgrRecords[index].msgStartAddr;
+				user.dataSize 		 = instance->mgrRecords[index].msgSize;
+				user.dataIndexInPoll = index;
+				memcpy(user.dataDesc, instance->mgrRecords[index].msgDetail, sizeof(user.dataDesc));
+
+				*pOut = user;
+				return CUS_FLASH_OK;
+			}
+		}
+
+		/* Record not found. */
+		return CUS_FLASH_NOT_FOUND;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DeleteByIndex( FlashMgr_Instance_t *instance, uint32_t recordIndex )
+	{
+		/* Check if the recordIndex valid. */
+		if ( !instance || (recordIndex >= instance->mgrRecordCount) )
+			return CUS_FLASH_PARAMETER;
+
+		/* Change the validFlag in Flash for this record to invalid. */
+		uint32_t controlBlockAddr = (instance->mgrRecords[recordIndex].msgStartAddr - sizeof(desc_t));
+		uint32_t validFlagAddr_inFlash = controlBlockAddr + offsetof(desc_t, validFlag);
+		uint16_t delFlag = 0xFFFEUL;	/* bit0 = 0. Invalid Record. */
+
+		Cus_Flash_State_t hReturn = Cus_Flash_WriteBuffer(validFlagAddr_inFlash, (uint8_t *)&delFlag, sizeof(delFlag));
+		if ( hReturn != CUS_FLASH_OK )
+		{
+			/* Flash write error. Return. */
+			return hReturn;
+		}
+
+		/* Use the tail data filling the holes that cased by delete operating. */
+		instance->mgrRecords[recordIndex] = instance->mgrRecords[instance->mgrRecordCount - 1];
+		instance->mgrRecordCount--;
+
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc )
+	{
+		if ( !desc || !instance )
+			return CUS_FLASH_PARAMETER;
+
+		/* Get record via desc. */
+		Cus_Flash_desc_t descOut = { 0 };
+		if ( Cus_FlashMgr_GetRecordByDesc(instance, desc, &descOut) != CUS_FLASH_OK )
+		{
+			/* Not find the relavent record. Return. */
+			return CUS_FLASH_NOT_FOUND;
+		}
+
+		/* Delete record via Index. */
+		Cus_Flash_State_t hReturn = Cus_FlashMgr_DeleteByIndex(instance, descOut.dataIndexInPoll);
+
+		return hReturn;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_GetRecordCount( FlashMgr_Instance_t *instance, uint16_t *pOut )
+	{
+		if ( !instance || !pOut )
+			return CUS_FLASH_PARAMETER;
+
+		*pOut = instance->mgrRecordCount;
+
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_GetFreeSpace( FlashMgr_Instance_t *instance, uint32_t *pOut )
+	{
+		if ( !instance || !pOut )
+			return CUS_FLASH_PARAMETER;
+
+		uint32_t Remain = (instance->mgrEndAddr - instance->mgrLowestFreeAddr);
+		if ( Remain < sizeof(desc_t) )
+		{
+			/* Not enough space left for the next control head. */
+			/* Return no free space left though there are some space hard to use. */
+			*pOut = 0;
+		}
+		else 
+		{
+			/* Return the available user data size(excluding the control header). */
+			*pOut = (Remain - sizeof(desc_t));
+		}
+
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance )
+	{
+		if ( !instance )
+			return CUS_FLASH_PARAMETER;
+
+		#if (DEVICE_STM32F4xx)
+			const Cus_Flash_Sector_t *Sector = Cus_Flash_GetSectorbyAddr(instance->mgrStartAddr);
+			if ( !Sector )
+			{
+				/* Not found relavent sector. Return. */
+				return CUS_FLASH_NOT_FOUND;
+			}
+
+			/* Erase the Manager-Controll sector. */
+			Cus_Flash_State_t hReturn = Cus_Flash_EraseSector(Sector);
+			if ( hReturn != CUS_FLASH_OK )
+			{
+				/* Erase failed! Return. */
+				return hReturn;
+			}
+
+			/* Reset the states. */
+			instance->mgrRecordCount = 0;
+			instance->mgrLowestFreeAddr = instance->mgrStartAddr;
+
+		#endif /* DEVICE_STM32F4xx */
+
 		return CUS_FLASH_OK;
 	}
 
