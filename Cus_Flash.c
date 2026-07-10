@@ -10,6 +10,10 @@ Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, 
 bool Cus_Flash_VerifyBuffer(uint32_t StartAddress, uint8_t *pData, uint32_t Size);
 bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 
+Cus_Flash_State_t Cus_Flash_PVDConfig( Cus_Flash_PVD_t PVDLevel );
+void Cus_Flash_PVDSet( void );
+void Cus_Flash_PVDClr( void );
+
 
 #if defined(FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx)
 	uint32_t Cus_Flash_GetPageAddress( uint32_t page_index );
@@ -53,6 +57,7 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteByIndex( FlashMgr_Instance_t *instance, uint32_t recordIndex );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc );
 	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
+	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
@@ -88,7 +93,7 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	{
 		#if ((DEVICE_FLASH_TOTAL_SIZE) >= (256UL * 1024UL))
 		/* SECTOR 0 ~ 3. 16KB per sector. */
-		{.secIndex = 0, .secStartAddr = FLASH_BASE, 		  .secSize = CUS_FLASH_SECTOR_16K},
+		{.secIndex = 0, .secStartAddr = FLASH_BASE          , .secSize = CUS_FLASH_SECTOR_16K},
 		{.secIndex = 1, .secStartAddr = FLASH_BASE + 0x04000, .secSize = CUS_FLASH_SECTOR_16K},
 		{.secIndex = 2, .secStartAddr = FLASH_BASE + 0x08000, .secSize = CUS_FLASH_SECTOR_16K},
 		{.secIndex = 3, .secStartAddr = FLASH_BASE + 0x0C000, .secSize = CUS_FLASH_SECTOR_16K},
@@ -132,6 +137,10 @@ bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 	static const uint8_t gsc_secTotalCount = (sizeof(SectorTable) / sizeof(SectorTable[0]));
 
 #endif /* (FLASH_TYPEERASE_SECTORS) && (DEVICE_STM32F4xx) */
+
+/* PVD Flag. */
+static uint8_t gs_lowVoltage;
+
 /* ****************************************************** */
 
 
@@ -314,6 +323,10 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 		is_NeedExtraEdit = 1;
 	}
 
+	/* Low voltage state not recovered. Erase operation not allowed. */
+	if ( gs_lowVoltage )
+		return CUS_FLASH_LOW_VOLTAGE_ERR;
+
 	__disable_irq();
 	Cus_Flash_Unlock();
 
@@ -386,6 +399,41 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	}
 
 	return true;
+}
+
+
+
+Cus_Flash_State_t 
+Cus_Flash_PVDConfig( Cus_Flash_PVD_t PVDLevel )
+{
+	/* Check if the PVDLEvel valid. */
+	if ( PVDLevel > CUS_FLASH_PVD_LEVEL7 )
+		return CUS_FLASH_PARAMETER;
+
+	/* Set PWR_CR PLS Bits. */
+	PWR->CR |= (PVDLevel << PWR_CR_PLS_Pos);
+
+	/* Enable PVD NVIC and set priority. */
+	NVIC_EnableIRQ(PVD_IRQn);
+	NVIC_SetPriority(PVD_IRQn, 0);
+}
+
+
+
+void 
+Cus_Flash_PVDSet( void )
+{
+	/* If PVD is enabled, place this API in the PVD ISR. */
+	gs_lowVoltage = 1;
+}
+
+
+
+void 
+Cus_Flash_PVDClr( void )
+{
+	/* Clear the PVD low voltage flag. */
+	gs_lowVoltage = 0;
 }
 
 
@@ -784,6 +832,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 			return CUS_FLASH_BUSY;
 		}
 
+		/* Low voltage state not recovered. Erase operation not allowed. */
+		if ( gs_lowVoltage )
+			return CUS_FLASH_LOW_VOLTAGE_ERR;
+
 		Cus_Flash_Unlock();
 
 		/* Set FLASH_CR SER bit. */
@@ -897,6 +949,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 			/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
 			return CUS_FLASH_BUSY;
 		}
+
+		/* Low voltage state not recovered. Erase operation not allowed. */
+		if ( gs_lowVoltage )
+			return CUS_FLASH_LOW_VOLTAGE_ERR;
 
 		/* Check. Whether the program region valid to be written. */
 		uint32_t waitCheckBytes;
@@ -1237,15 +1293,23 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	{
 		if ( !pReq || !pReq->DataBuff || !pReq->DataSize || !instance )
 			return CUS_FLASH_PARAMETER;
+
+		/* Ensure the instance is still valid (not deinitialized) before proceeding. */
+		if ( !instance->mgrStartAddr || !instance->mgrEndAddr )
+			return CUS_FLASH_PARAMETER;
 		
 		/* Check if the FreeSpace is enough. */
 		if ( !instance->mgrLowestFreeAddr || (instance->mgrLowestFreeAddr == instance->mgrEndAddr) )
 			return CUS_FLASH_NOSPACE_ERR;
 
+		/* Check if the requested data size exceeds the remaining space.  */
+		if ( (pReq->DataSize + sizeof(desc_t)) > (instance->mgrEndAddr - instance->mgrLowestFreeAddr) )
+			return CUS_FLASH_NOSPACE_ERR;
+
 		/* Check if the Record-Poll have free space. */
 		if ( instance->mgrRecordCount >= FLASH_MGR_MAX_RECORDS )
 			return CUS_FLASH_OVFLW_ERR;
-		
+
 		#if (DEVICE_STM32F4xx)
 			/* Constract the write request pack. */
 			Cus_Flash_SecReq_t package;
@@ -1296,7 +1360,8 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_Flash_State_t 
 	Cus_FlashMgr_GetRecordByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_desc_t *pOut )
 	{
-		if ( !desc || !pOut || !instance )	return CUS_FLASH_PARAMETER;
+		if ( !desc || !pOut || !instance )	
+			return CUS_FLASH_PARAMETER;
 
 		/* Match the specified Records. Newest record first. */
 		for( int16_t index = (int16_t)(instance->mgrRecordCount - 1); index >= 0; index-- )
@@ -1329,6 +1394,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		if ( !instance || (recordIndex >= instance->mgrRecordCount) )
 			return CUS_FLASH_PARAMETER;
 
+		/* Ensure the instance is still valid (not deinitialized) before proceeding. */
+		if ( !instance->mgrStartAddr || !instance->mgrEndAddr )
+			return CUS_FLASH_PARAMETER;
+
 		/* Change the validFlag in Flash for this record to invalid. */
 		uint32_t controlBlockAddr = (instance->mgrRecords[recordIndex].msgStartAddr - sizeof(desc_t));
 		uint32_t validFlagAddr_inFlash = controlBlockAddr + offsetof(desc_t, validFlag);
@@ -1354,6 +1423,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc )
 	{
 		if ( !desc || !instance )
+			return CUS_FLASH_PARAMETER;
+
+		/* Ensure the instance is still valid (not deinitialized) before proceeding. */
+		if ( !instance->mgrStartAddr || !instance->mgrEndAddr )
 			return CUS_FLASH_PARAMETER;
 
 		/* Get record via desc. */
@@ -1391,6 +1464,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		if ( !instance || !pOut )
 			return CUS_FLASH_PARAMETER;
 
+		/* Ensure the instance is still valid (not deinitialized) before proceeding. */
+		if ( !instance->mgrStartAddr || !instance->mgrEndAddr )
+			return CUS_FLASH_PARAMETER;
+
 		uint32_t Remain = (instance->mgrEndAddr - instance->mgrLowestFreeAddr);
 		if ( Remain < sizeof(desc_t) )
 		{
@@ -1413,6 +1490,10 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 	Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance )
 	{
 		if ( !instance )
+			return CUS_FLASH_PARAMETER;
+
+		/* Ensure the instance is still valid (not deinitialized) before proceeding. */
+		if ( !instance->mgrStartAddr || !instance->mgrEndAddr )
 			return CUS_FLASH_PARAMETER;
 
 		#if (DEVICE_STM32F4xx)
@@ -1438,6 +1519,36 @@ Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size )
 		#endif /* DEVICE_STM32F4xx */
 
 		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance )
+	{
+		if ( !instance )
+			return CUS_FLASH_PARAMETER;
+
+		/* Traverse the manager table to find the index for this instance. */
+		for( int16_t index = (int16_t)(gs_ActivateCount - 1); index >= 0; index-- )
+		{
+			if ( gs_ActivateMgr[index] == instance )
+			{
+				/* Find the relavent instance. Delete. */
+				gs_ActivateMgr[index] = gs_ActivateMgr[(gs_ActivateCount - 1)];
+				gs_ActivateCount--;
+
+				/* Reset the states. */
+				instance->mgrEndAddr = 0;
+				instance->mgrLowestFreeAddr = 0;
+				instance->mgrStartAddr = 0;
+
+				return CUS_FLASH_OK;
+			}
+		}
+
+		/* Not Found. Return. */
+		return CUS_FLASH_NOT_FOUND;
 	}
 
 #endif /* CUS_FLASH_USE_MANAGER */

@@ -42,22 +42,37 @@
 
 typedef enum Cus_Flash_State
 {
-  CUS_FLASH_OK,
-  CUS_FLASH_TIMEOUT,
-  CUS_FLASH_BUSY,
-  CUS_FLASH_ERROR,
-  CUS_FLASH_PARAMETER,
-  CUS_FLASH_PROGRAM_WRPRTERR,
-  CUS_FLASH_PROGRAM_PGERR,
-  CUS_FLASH_ALIGNED_ERR,
-  CUS_FLASH_NOT_ERASED,
-  CUS_FLASH_VERIFY_ERR,
-  CUS_FLASH_OVFLW_ERR,
-  CUS_FLASH_NOSPACE_ERR,
-  CUS_FLASH_NOT_FOUND,
-  CUS_FLASH_OVERLAP_ERR,
+	CUS_FLASH_OK,
+	CUS_FLASH_TIMEOUT,
+	CUS_FLASH_BUSY,
+	CUS_FLASH_ERROR,
+	CUS_FLASH_PARAMETER,
+	CUS_FLASH_PROGRAM_WRPRTERR,
+	CUS_FLASH_PROGRAM_PGERR,
+	CUS_FLASH_ALIGNED_ERR,
+	CUS_FLASH_NOT_ERASED,
+	CUS_FLASH_VERIFY_ERR,
+	CUS_FLASH_OVFLW_ERR,
+	CUS_FLASH_NOSPACE_ERR,
+	CUS_FLASH_NOT_FOUND,
+	CUS_FLASH_OVERLAP_ERR,
+	CUS_FLASH_LOW_VOLTAGE_ERR,
 
 } Cus_Flash_State_t;
+
+
+typedef enum Cus_Flash_PVD
+{
+	CUS_FLASH_PVD_LEVEL0 = 0,
+	CUS_FLASH_PVD_LEVEL1,
+	CUS_FLASH_PVD_LEVEL2,
+	CUS_FLASH_PVD_LEVEL3,
+	CUS_FLASH_PVD_LEVEL4,
+	CUS_FLASH_PVD_LEVEL5,
+	CUS_FLASH_PVD_LEVEL6,
+	CUS_FLASH_PVD_LEVEL7,
+
+} Cus_Flash_PVD_t;
 
 
 /* *********************** Define ************************ */
@@ -255,6 +270,7 @@ typedef enum Cus_Flash_State
 	Cus_Flash_State_t Cus_FlashMgr_GetRecordCount( FlashMgr_Instance_t *instance, uint16_t *pOut );
 	Cus_Flash_State_t Cus_FlashMgr_GetFreeSpace( FlashMgr_Instance_t *instance, uint32_t *pOut );
 	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
+	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
 
 	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
 
@@ -264,18 +280,21 @@ typedef enum Cus_Flash_State
 
 
 /* ----------------------------------------------------------- */
-  bool Cus_Flash_CalibrateLatency( void );
-  void Cus_Flash_Unlock( void );
-  void Cus_Flash_Lock( void );
-  Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size );
-  bool Cus_Flash_VerifyBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Size );
-  bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
+Cus_Flash_State_t Cus_Flash_PVDConfig( Cus_Flash_PVD_t PVDLevel );
+void Cus_Flash_PVDSet( void );
+void Cus_Flash_PVDClr( void );
 
+bool Cus_Flash_CalibrateLatency( void );
+void Cus_Flash_Unlock( void );
+void Cus_Flash_Lock( void );
+Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size );
+bool Cus_Flash_VerifyBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Size );
+bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
 
-  __weak void Cus_FLASH_UnlockFailed_Hook( void );
-  __weak void Cus_FLASH_LockFailed_Hook( void );
-  __weak void Cus_FLASH_EraseFailed_Hook( void );
-  __weak void Cus_FLASH_VerifyBufferFailed_Hook( uint32_t StartAddress, uint8_t *pData, uint32_t BufferSize );
+__weak void Cus_FLASH_UnlockFailed_Hook( void );
+__weak void Cus_FLASH_LockFailed_Hook( void );
+__weak void Cus_FLASH_EraseFailed_Hook( void );
+__weak void Cus_FLASH_VerifyBufferFailed_Hook( uint32_t StartAddress, uint8_t *pData, uint32_t BufferSize );
 /* ----------------------------------------------------------- */
 
 
