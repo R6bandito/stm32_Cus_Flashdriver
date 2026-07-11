@@ -2,12 +2,6 @@
 
 
 #if defined(FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx)
-    __weak void 
-    Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage )
-    {
-        UNUSED(ppPage);
-        __nop();
-    }
 
     __weak void 
     Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage )
@@ -15,6 +9,7 @@
         UNUSED(pPage);
         __nop();
     }
+    
 #endif 
 
 

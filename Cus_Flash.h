@@ -4,8 +4,13 @@
 
 
 /* ****************************************************** */
-	#define DEVICE_STM32F1xx          			(0)
-	#define DEVICE_STM32F4xx          			(1)
+	#define DEVICE_STM32F1xx          			(1)
+		#if (DEVICE_STM32F1xx)
+			#define CUS_FLASH_BYTE_PER_PAGE		(2048UL)
+			#warning "Please change CUS_FLASH_BYTE_PER_PAGE to your acutal value."
+		#endif 
+
+	#define DEVICE_STM32F4xx          			(0)
 		#if (DEVICE_STM32F4xx)
 			#define DEVICE_FLASH_TOTAL_SIZE		(256UL * 1024UL)
 			#warning "Please change DEVICE_FLASH_TOTAL_SIZE to your acutal value. And the format like this: (e.g., 2048*1024 for F42x/F43x)!"
@@ -102,7 +107,7 @@ typedef enum Cus_Flash_PVD
 
 #define FLASH_KEYR_KEY1               	(0x45670123UL)
 #define FLASH_KEYR_KEY2               	(0xCDEF89ABUL)
-#define FLASH_ERASE_TIMEOUT_MS        	(100U)
+#define FLASH_ERASE_TIMEOUT_MS        	(3000U)
 #define FLASH_SIZE_BYTES              	(FLASH_SIZE_REG * 1024UL)
 #define FLASH_END_ADDR                	(FLASH_BASE + FLASH_SIZE_BYTES)
 /* ******************************************************* */
@@ -132,34 +137,33 @@ typedef enum Cus_Flash_PVD
 /* ----------------------------------------------------------- */
 #if defined(FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx)
 
-	#define FLASH_BYTES_PER_PAGE        (1024U)
-
-
-	typedef struct Cus_Flash_Page Cus_Flash_Page_t;
-	struct Cus_Flash_Page
+	typedef struct 
 	{
-		uint8_t PageDataBuffer[FLASH_BYTES_PER_PAGE];
-		uint32_t PageAddress;
+		uint8_t *pBuffer;
+		uint32_t bufSize;
+		uint32_t Offset;
+		uint32_t PageStartAddress;
 
-		void (*Reset)( Cus_Flash_Page_t *pPage );
-		void (*Release)( Cus_Flash_Page_t *pPage );
-	};
+		#if (CUS_FLASH_USE_MANAGER)
+		char desc[16];							/**< Human-readable description stored in the on-flash header. */
+		uint16_t dataType;						/**< Application-defined data type tag. */
+		#endif /* CUS_FLASH_USE_MANAGER */
+
+	} Cus_Flash_PageReq_t;
 
 
 	Cus_Flash_State_t Cus_Flash_ErasePage(uint32_t PageAddress);
-	uint16_t Cus_Flash_ErasePages( uint32_t PageStartAddress, uint16_t PageCount );
+	int16_t Cus_Flash_ErasePages( uint32_t PageStartAddress, uint16_t PageCount );
 	uint32_t Cus_Flash_GetPageAddress( uint32_t page_index );
 	uint32_t Cus_Flash_GetPageStart( uint32_t Address );
 	int16_t Cus_Flash_GetPageIndex( uint32_t Address );
-	uint16_t Cus_Flash_GetTotalPages( void );
+	int16_t Cus_Flash_GetTotalPages( void );
 	int32_t Cus_Flash_GetRemainPages( uint32_t PageAddress );
-	Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_Page_t *pPage );
-	Cus_Flash_State_t Factory_GetPageControlBlock( Cus_Flash_Page_t **pPageOut );
-	bool Cus_Flash_ReadOutPage( uint32_t PageAddress, uint8_t *pOutBuffer, int32_t Size );
+	Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_PageReq_t *pPage );
+	Cus_Flash_State_t Cus_Flash_ReadPage( Cus_Flash_PageReq_t *pPage );
 
 
-	__weak void Cus_FLASH_PageStructMallocFailed_Hook( Cus_Flash_Page_t **ppPage );
-	__weak void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage );
+	__weak void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_PageReq_t *pPage );
 
 #endif /* (FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx) */
 
@@ -289,7 +293,7 @@ void Cus_Flash_Unlock( void );
 void Cus_Flash_Lock( void );
 Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size );
 bool Cus_Flash_VerifyBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Size );
-bool Cus_Flash_IsErase( uint32_t StartAddress, uint32_t Size );
+bool Cus_Flash_IsValid( uint32_t StartAddress, uint32_t Size );
 
 __weak void Cus_FLASH_UnlockFailed_Hook( void );
 __weak void Cus_FLASH_LockFailed_Hook( void );
