@@ -4,7 +4,7 @@
 #if defined(FLASH_TYPEERASE_PAGES) && (DEVICE_STM32F1xx)
 
     __weak void 
-    Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_Page_t *pPage )
+    Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_PageReq_t *pPage )
     {
         UNUSED(pPage);
         __nop();

@@ -1354,7 +1354,6 @@ Cus_Flash_PVDClr( void )
 		memcpy(package.desc, pReq->DataDesc, sizeof(package.desc));
 
 		#if (DEVICE_STM32F4xx)
-
 			/* If the device is F4xx serial. Get the Sector. */
 			const Cus_Flash_Sector_t *Sector = Cus_Flash_GetSectorbyAddr(instance->mgrStartAddr);
 			if ( !Sector )
@@ -1404,6 +1403,11 @@ Cus_Flash_PVDClr( void )
 
 		/* Update the lowestFreeAddr. */
 		instance->mgrLowestFreeAddr += sizeof(desc_t) + package.bufSize;
+
+		/* Align to the next word boundary. */
+		if ( (instance->mgrLowestFreeAddr & 0x03) )
+			instance->mgrLowestFreeAddr = (instance->mgrLowestFreeAddr + 3) & ~0x03;
+
 		if ( instance->mgrLowestFreeAddr >= instance->mgrEndAddr )
 			instance->mgrLowestFreeAddr = instance->mgrEndAddr;
 

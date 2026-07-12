@@ -159,9 +159,11 @@ typedef enum Cus_Flash_PVD
 	int16_t Cus_Flash_GetPageIndex( uint32_t Address );
 	int16_t Cus_Flash_GetTotalPages( void );
 	int32_t Cus_Flash_GetRemainPages( uint32_t PageAddress );
-	Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_PageReq_t *pPage );
-	Cus_Flash_State_t Cus_Flash_ReadPage( Cus_Flash_PageReq_t *pPage );
 
+	#if (!CUS_FLASH_USE_MANAGER)
+		Cus_Flash_State_t Cus_Flash_WritePage( Cus_Flash_PageReq_t *pPage );
+		Cus_Flash_State_t Cus_Flash_ReadPage( Cus_Flash_PageReq_t *pPage );
+	#endif 
 
 	__weak void Cus_FLASH_PageWriteFailed_Hook( Cus_Flash_PageReq_t *pPage );
 
