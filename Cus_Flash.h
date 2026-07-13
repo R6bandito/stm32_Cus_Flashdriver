@@ -25,6 +25,15 @@
 			#define FLASH_MGR_MAX_INSTANCES		(4)
 		#endif /* CUS_FLASH_USE_MANAGER */
 
+	#define CUS_FLASH_USE_SYS					(1)
+		#if (CUS_FLASH_USE_SYS)
+			#include "./Cus_Flash_RTOS_Port.h"
+
+			#ifndef CUS_FLASH_SYS_ON
+				#error "Plz enable RTOS in Cus_Flash_RTOS_Port.h."
+			#endif /* CUS_FLASH_SYS_ON */
+		#endif /* CUS_FLASH_USE_SYS */
+
 	#define CUS_MEM_ALIGNED						(4UL)
 /* ****************************************************** */
 
@@ -62,6 +71,7 @@ typedef enum Cus_Flash_State
 	CUS_FLASH_NOT_FOUND,
 	CUS_FLASH_OVERLAP_ERR,
 	CUS_FLASH_LOW_VOLTAGE_ERR,
+	CUS_FLASH_MUTEX_ERR,
 
 } Cus_Flash_State_t;
 

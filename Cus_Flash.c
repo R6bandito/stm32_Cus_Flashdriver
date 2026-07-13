@@ -1,10 +1,7 @@
-#include "Cus_Flash.h"
+#include "./Cus_Flash.h"
 
 
 /* ****************************************************** */
-static uint32_t Cus_Flash_GetSpinCount( uint32_t ms );
-static Cus_Flash_State_t Cus_Flash_WaitBusy( uint32_t timeout_ms );
-
 void Cus_Flash_Unlock( void );
 void Cus_Flash_Lock( void );
 bool Cus_Flash_CalibrateLatency( void );
@@ -56,6 +53,18 @@ void Cus_Flash_PVDClr( void );
 	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
 	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
 #endif /* CUS_FLASH_USE_MANAGER */
+/* ****************************************************** */
+
+
+/* ****************************************************** */
+static uint32_t Cus_Flash_GetSpinCount( uint32_t ms );
+static Cus_Flash_State_t Cus_Flash_WaitBusy( uint32_t timeout_ms );
+
+static inline void __enter_critical( void );
+static inline void __exit_critical( void );
+static inline bool __sys_takeSemaphore( void );
+static inline void __sys_giveSemaphore( void );
+
 /* ****************************************************** */
 
 
@@ -140,6 +149,54 @@ static volatile uint8_t gs_lowVoltage;
 
 /* ****************************************************** */
 
+static inline void 
+__enter_critical( void )
+{
+	#if (CUS_FLASH_USE_SYS)
+		CUS_FLASH_ENTER_CRITICAL();
+	#else 
+		__nop();
+	#endif /* CUS_FLASH_USE_SYS */
+}
+
+
+
+static inline void 
+__exit_critical( void )
+{
+	#if (CUS_FLASH_USE_SYS)
+		CUS_FLASH_EXIT_CRITICAL();
+	#else 
+		__nop();
+	#endif /* CUS_FLASH_USE_SYS */
+}
+
+
+
+static inline bool 
+__sys_takeSemaphore( void )
+{
+	#if (CUS_FLASH_USE_SYS)
+		bool isLock = Cus_Flash_SYS_Lock();
+		return isLock;
+	#else 
+		return true;
+	#endif /* CUS_FLASH_USE_SYS */
+}
+
+
+
+static inline void 
+__sys_giveSemaphore( void )
+{
+	#if (CUS_FLASH_USE_SYS)
+		Cus_Flash_SYS_Unlock();
+	#else 
+		__nop();
+	#endif /* CUS_FLASH_USE_SYS */
+}
+
+
 
 void 
 Cus_Flash_Lock( void )
@@ -193,11 +250,13 @@ Cus_Flash_Unlock( void )
 	}
 
 	/* Start Flash unlock sequence by writing KEY1 to FLASH_KEYR. */ 
+	__enter_critical();
 	FLASH->KEYR = FLASH_KEYR_KEY1;    
 	__DSB();
 
 	/* Writing the last KEY Code(KEY2) to FLASH_KEYR. */
 	FLASH->KEYR = FLASH_KEYR_KEY2;    
+	__exit_critical();
 
 	FLASH_CR_RegTemp = FLASH->CR;
 	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) )   
@@ -355,6 +414,14 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 	if ( gs_lowVoltage )
 		return CUS_FLASH_LOW_VOLTAGE_ERR;
 
+	/* Take Semaphore.(If in RTOS environment.) */
+	bool isTake = __sys_takeSemaphore();
+	if ( !isTake )
+	{
+		/* Failed to acquire mutex. Return. */
+		return CUS_FLASH_MUTEX_ERR;
+	}
+
 	Cus_Flash_Unlock();
 
 	/* Set FLASH_CR PG Bit. */
@@ -389,6 +456,7 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 		{
 			/* Reset FLASH_CR. Return. */
 			FLASH->CR &= ~(0x01UL << FLASH_CR_PG_Pos);
+			__sys_giveSemaphore();
 			Cus_Flash_Lock();
 			return hReturn;
 		}
@@ -398,6 +466,7 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 	{
 		/* Verify error. Inform upper layer and return. */
 		FLASH->CR &= ~(0x01UL << FLASH_CR_PG_Pos);
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		Cus_FLASH_VerifyBufferFailed_Hook(StartAddress, pData, Buffer_Size);
 		return CUS_FLASH_VERIFY_ERR;
@@ -405,6 +474,7 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 
 	FLASH->CR &= ~(0x01UL << FLASH_CR_PG_Pos);
 	Cus_Flash_Lock();
+	__sys_giveSemaphore();
 	return CUS_FLASH_OK;
 }
 
@@ -546,8 +616,17 @@ Cus_Flash_PVDClr( void )
 			return hReturn;
 		}
 
+		/* Take Semaphore.(If in RTOS environment.) */
+		bool isTake = __sys_takeSemaphore();
+		if ( !isTake )
+		{
+			/* Accquire error. */
+			return CUS_FLASH_MUTEX_ERR;
+		}
+
 		Cus_Flash_Unlock();
 
+		__enter_critical();
 		/* Set FLASH_CR PER Bit. */
 		FLASH->CR |= FLASH_CR_PER_Msk;
 
@@ -556,10 +635,12 @@ Cus_Flash_PVDClr( void )
 
 		/* Start erasing. (Set FLASH_CR STRT Bit) */
 		FLASH->CR |= FLASH_CR_STRT_Msk;
+		__exit_critical();
 
 		hReturn = Cus_Flash_WaitBusy(FLASH_ERASE_TIMEOUT_MS);
 		if ( hReturn != CUS_FLASH_OK )
 		{
+			__sys_giveSemaphore();
 			Cus_FLASH_EraseFailed_Hook();
 			Cus_Flash_Lock();
 			return hReturn;
@@ -569,6 +650,7 @@ Cus_Flash_PVDClr( void )
 		FLASH->CR &= ~FLASH_CR_PER_Msk;
 
 		/* Normal back. */
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		return CUS_FLASH_OK;
 	}
@@ -866,6 +948,12 @@ Cus_Flash_PVDClr( void )
 		if ( gs_lowVoltage )
 			return CUS_FLASH_LOW_VOLTAGE_ERR;
 
+		bool isTake = __sys_takeSemaphore();
+		if ( !isTake )
+		{
+			return CUS_FLASH_MUTEX_ERR;
+		}
+
 		Cus_Flash_Unlock();
 
 		/* Set FLASH_CR SER bit. */
@@ -886,11 +974,13 @@ Cus_Flash_PVDClr( void )
 			default:	goto ERROR;
 		}
 
+		__enter_critical();
 		/* Write SectorIndex which waiting for erasing to FLASH_CR SNB. */
 		FLASH->CR |= (snbVal << FLASH_CR_SNB_Pos);
 
 		/* Set FLASH_CR STRT bit. */
 		FLASH->CR |= FLASH_CR_STRT_Msk;
+		__exit_critical();
 
 		/* Wait for BSY to clear (erase finished). */
 		timeout = Cus_Flash_GetSpinCount(3000);		/* about 3s. */
@@ -905,10 +995,12 @@ Cus_Flash_PVDClr( void )
 		}
 
 		/* Normal back. */
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		return CUS_FLASH_OK;
 
 	ERROR:
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		Cus_FLASH_EraseSectorFailed_Hook(pSector);
 		return CUS_FLASH_ERROR;
@@ -984,6 +1076,12 @@ Cus_Flash_PVDClr( void )
 		if ( gs_lowVoltage )
 			return CUS_FLASH_LOW_VOLTAGE_ERR;
 
+		bool isTake = __sys_takeSemaphore();
+		if ( !isTake )
+		{
+			return CUS_FLASH_MUTEX_ERR;
+		}
+
 		/* Check. Whether the program region valid to be written. */
 		uint32_t waitCheckBytes;
 		#if (CUS_FLASH_USE_MANAGER)
@@ -1026,11 +1124,13 @@ Cus_Flash_PVDClr( void )
 
 		Cus_Flash_Unlock();
 
+		__enter_critical();
 		/* Set FLASH_CR PG bit. */
 		FLASH->CR |= FLASH_CR_PG_Msk;
 
 		/* Enable x32 Program. PSIZE=0b10 */
 		FLASH->CR = ((FLASH->CR & ~FLASH_CR_PSIZE_Msk) | (0x02UL << FLASH_CR_PSIZE_Pos));
+		__exit_critical();
 
 		uint32_t dataBlockStartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset);
 		#if (CUS_FLASH_USE_MANAGER)
@@ -1120,19 +1220,23 @@ Cus_Flash_PVDClr( void )
 		/* Verify The data block. */
 		if ( !Cus_Flash_VerifyBuffer(dataBlockStartAddr, pRequest->pBuffer, pRequest->bufSize) )	goto VERIFY_ERR;
 
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		return CUS_FLASH_OK;
 
 	NOT_ERASED:
+		__sys_giveSemaphore();
 		Cus_FLASH_WriteSectorFailed_Hook(pRequest->pSector);
 		return CUS_FLASH_NOT_ERASED;
 
 	PG_ERR:
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		Cus_FLASH_WriteSectorFailed_Hook(pRequest->pSector);
 		return CUS_FLASH_ERROR;
 
 	VERIFY_ERR:
+		__sys_giveSemaphore();
 		Cus_Flash_Lock();
 		Cus_FLASH_VerifyBufferFailed_Hook(dataBlockStartAddr, pRequest->pBuffer, pRequest->bufSize);
 		return CUS_FLASH_VERIFY_ERR;
