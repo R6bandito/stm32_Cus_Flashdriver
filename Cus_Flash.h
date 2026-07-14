@@ -44,14 +44,15 @@
 
 
 #if (DEVICE_STM32F1xx)
-  #include "stm32f1xx_hal.h"
+  #include "stm32f1xx.h"
 #elif (DEVICE_STM32F4xx)
-  #include "stm32f4xx_hal.h"
+  #include "stm32f4xx.h"
 #endif 
 
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 
 typedef enum Cus_Flash_State
@@ -276,7 +277,11 @@ typedef enum Cus_Flash_PVD
 		FlashMgr_Record_t mgrRecords[FLASH_MGR_MAX_RECORDS];
 
 	} FlashMgr_Instance_t;
-	
+
+
+	/* Debug print callback. */
+	typedef void (*Cus_Flash_PrintCB)( const char *src );
+
 
 	Cus_Flash_State_t Cus_FlashMgr_Init( FlashMgr_Instance_t *instance, uint32_t start_addr, uint32_t end_addr );
 	Cus_Flash_State_t Cus_FlashMgr_Append( FlashMgr_Instance_t *instance, const Cus_FlashMgr_Req_t *pReq );
@@ -287,6 +292,8 @@ typedef enum Cus_Flash_PVD
 	Cus_Flash_State_t Cus_FlashMgr_GetFreeSpace( FlashMgr_Instance_t *instance, uint32_t *pOut );
 	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
 	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
+	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
 
 	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
 

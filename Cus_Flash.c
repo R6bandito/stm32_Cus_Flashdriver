@@ -52,6 +52,8 @@ void Cus_Flash_PVDClr( void );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteByDesc( FlashMgr_Instance_t *instance, const char *desc );
 	Cus_Flash_State_t Cus_FlashMgr_EraseRegion( FlashMgr_Instance_t *instance );
 	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
+	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
+	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
@@ -896,7 +898,7 @@ Cus_Flash_PVDClr( void )
 	Cus_Flash_EnableART( void )
 	{
 		uint32_t acrReg = FLASH->ACR;
-		uint32_t currentHCLK = HAL_RCC_GetHCLKFreq();
+		uint32_t currentHCLK = SystemCoreClock;
 		if ( (currentHCLK > SYSTEMCLOCK_60Mhz) && ((acrReg & FLASH_ACR_LATENCY_Msk) < 2) )
 		{
 			/* Wrong ACR LATENCY Config.Refuse to enable ART. */
@@ -1527,21 +1529,33 @@ Cus_Flash_PVDClr( void )
 			return CUS_FLASH_PARAMETER;
 
 		/* Match the specified Records. Newest record first. */
+		FlashMgr_Record_t *best = NULL;
+		uint32_t idx = 0;
 		for( int16_t index = (int16_t)(instance->mgrRecordCount - 1); index >= 0; index-- )
 		{
 			if ( (strncmp(instance->mgrRecords[index].msgDetail, desc, sizeof(instance->mgrRecords[index].msgDetail)) == 0) )
 			{
-				/* Matched the specific Records. Return to user. */
-				Cus_Flash_desc_t user;
-				user.dataType 		 = instance->mgrRecords[index].msgType;
-				user.dataStartAddr 	 = instance->mgrRecords[index].msgStartAddr;
-				user.dataSize 		 = instance->mgrRecords[index].msgSize;
-				user.dataIndexInPoll = index;
-				memcpy(user.dataDesc, instance->mgrRecords[index].msgDetail, sizeof(user.dataDesc));
-
-				*pOut = user;
-				return CUS_FLASH_OK;
+				if ( !best || instance->mgrRecords[index].msgStartAddr > best->msgStartAddr )
+				{
+					/* Ensure the latest message is retrieved. */
+					best = &instance->mgrRecords[index];
+					idx = index;
+				}
 			}
+		}
+
+		if ( best )
+		{
+			/* Matched the specific Records. Return to user. */
+			Cus_Flash_desc_t user;
+			user.dataType 		 = best->msgType;
+			user.dataStartAddr 	 = best->msgStartAddr;
+			user.dataSize 		 = best->msgSize;
+			user.dataIndexInPoll = idx;
+			memcpy(user.dataDesc, best->msgDetail, sizeof(user.dataDesc));
+
+			*pOut = user;
+			return CUS_FLASH_OK;
 		}
 
 		/* Record not found. */
@@ -1722,6 +1736,105 @@ Cus_Flash_PVDClr( void )
 
 		/* Not Found. Return. */
 		return CUS_FLASH_NOT_FOUND;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt )
+	{
+		if ( !instance || !instance->mgrStartAddr || !instance->mgrEndAddr || !desc )
+			return CUS_FLASH_PARAMETER;
+
+		uint16_t deleted = 0;
+		Cus_Flash_desc_t Out;
+
+		/* O(n^2) complexity, but acceptable since the record count is small. */
+		while( Cus_FlashMgr_GetRecordByDesc(instance, desc, &Out) == CUS_FLASH_OK )
+		{
+			/* Relavent records still exist. Continue deletion.  */
+			Cus_Flash_State_t hReturn = Cus_FlashMgr_DeleteByIndex(instance, Out.dataIndexInPoll);
+			if ( hReturn != CUS_FLASH_OK )
+			{
+				/* Delete Err. Return. */
+				return hReturn;
+			}
+
+			/* Successful delete this record. Continue. */
+			deleted++;
+
+			if ( delCnt )	*delCnt = deleted;
+		}
+
+		/* Has been deleted all relavent records. */
+		return (deleted ? CUS_FLASH_OK : CUS_FLASH_NOT_FOUND);
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback )
+	{
+		if ( !instance || !pcallback || !desc )
+			return CUS_FLASH_PARAMETER;
+
+		/* Print the table header first. */
+		pcallback("Idx Type   Size  FlashAddr      Desc");
+		pcallback("-------------------------------------");
+
+		uint16_t outPutMask[FLASH_MGR_MAX_RECORDS] = { 0 };
+		char buffer[64] = { 0 };
+		uint16_t total = 0;
+		for( uint16_t i = 0; i < instance->mgrRecordCount; i++ )
+		{
+			uint32_t bestAddr = 0;
+			uint32_t bestIdx = 0;
+			bool found = false;
+
+			for( uint16_t j = 0; j < instance->mgrRecordCount; j++ )
+			{
+				/* This entry has already been processed. Skip. */
+				if ( outPutMask[j] )
+					continue;
+
+				/* Check if the desc not match. Continue. */
+				if ( strncmp(desc, instance->mgrRecords[j].msgDetail, 16) != 0 )	
+					continue;
+				
+				/* Find the record entry matching the Desc, and check if its address exceeds the current maximum. */
+				if ( instance->mgrRecords[j].msgStartAddr > bestAddr )
+				{
+					bestAddr = instance->mgrRecords[j].msgStartAddr;
+					bestIdx = j;
+					found = true;
+				}
+			}
+
+			total++;
+			/* Has no matched records. Break.*/
+			if ( !found )	break;
+
+			/* Process this matched entries. */
+			outPutMask[bestIdx] = 1;
+			FlashMgr_Record_t *Record = &instance->mgrRecords[bestIdx];
+			snprintf(buffer, sizeof(buffer), "%3u %4u %6lu 0x%08lX %-16s",
+						total, Record->msgType, Record->msgSize, Record->msgStartAddr, Record->msgDetail);
+
+			pcallback(buffer);
+			memset(buffer, 0, sizeof(buffer));
+		}
+
+		/* Print the table tail. */
+		pcallback("-------------------------------------");
+
+		uint32_t freeBytes = 0;
+		Cus_FlashMgr_GetFreeSpace(instance, &freeBytes);
+
+		snprintf(buffer, sizeof(buffer), " Free: %lu bytes  |  Records: %u",
+					(unsigned long)freeBytes, (unsigned int)total);
+		pcallback(buffer);
+
+		return CUS_FLASH_OK;
 	}
 
 #endif /* CUS_FLASH_USE_MANAGER */
