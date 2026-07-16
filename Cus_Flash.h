@@ -19,8 +19,6 @@
 	#define CUS_FLASH_USE_MANAGER				(1)
 		#if (CUS_FLASH_USE_MANAGER)
 			#define CUS_MANAGER_MAGIC			(0xBEEFFEEBUL)
-			#define CUS_MANAGER_FLAG_VALID		(0xFFFFUL)
-			#define CUS_MANAGER_FLAG_INVALID	(0x0000UL)
 			#define FLASH_MGR_MAX_RECORDS		(64)	/* Plz Adjust this value to match your actual situation. */
 			#define FLASH_MGR_MAX_INSTANCES		(4)
 		#endif /* CUS_FLASH_USE_MANAGER */
@@ -33,9 +31,23 @@
 				#error "Plz enable RTOS in Cus_Flash_RTOS_Port.h."
 			#endif /* CUS_FLASH_SYS_ON */
 		#endif /* CUS_FLASH_USE_SYS */
-
-	#define CUS_MEM_ALIGNED						(4UL)
 /* ****************************************************** */
+
+
+/**
+ * CUS_FLASH_GET_TICK — Get system millisecond timestamp.
+ *
+ * User may override. Default uses the Cortex-M DWT cycle counter
+ * (zero peripheral dependency; call Cus_Flash_SYS_TickInit() at startup).
+ * Examples:
+ *   #define CUS_FLASH_GET_TICK()  HAL_GetTick()
+ *   #define CUS_FLASH_GET_TICK()  xTaskGetTickCount()
+ */
+#ifndef CUS_FLASH_GET_TICK
+	#define CUS_FLASH_GET_TICK()  Cus_Flash_SYS_GetTick()
+	void Cus_Flash_SYS_TickInit( void );
+	uint32_t Cus_Flash_SYS_GetTick( void );
+#endif
 
 
 #if (DEVICE_STM32F1xx) && (DEVICE_STM32F4xx)
@@ -294,6 +306,7 @@ typedef enum Cus_Flash_PVD
 	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
 	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
+	Cus_Flash_State_t Cus_FlashMgr_DumpAll( FlashMgr_Instance_t *instance, Cus_Flash_PrintCB pcallback );
 
 	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
 

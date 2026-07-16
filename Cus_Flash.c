@@ -5,6 +5,8 @@
 void Cus_Flash_Unlock( void );
 void Cus_Flash_Lock( void );
 bool Cus_Flash_CalibrateLatency( void );
+void Cus_Flash_SYS_TickInit( void );
+uint32_t Cus_Flash_SYS_GetTick( void );
 Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size );
 bool Cus_Flash_VerifyBuffer(uint32_t StartAddress, uint8_t *pData, uint32_t Size);
 bool Cus_Flash_IsValid( uint32_t StartAddress, uint32_t Size );
@@ -54,12 +56,13 @@ void Cus_Flash_PVDClr( void );
 	Cus_Flash_State_t Cus_FlashMgr_DeInit( FlashMgr_Instance_t *instance );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
 	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
+	Cus_Flash_State_t Cus_FlashMgr_DumpAll( FlashMgr_Instance_t *instance, Cus_Flash_PrintCB pcallback );
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
 
 /* ****************************************************** */
-static uint32_t Cus_Flash_GetSpinCount( uint32_t ms );
+static uint32_t gs_dwtTickPerMs;
 static Cus_Flash_State_t Cus_Flash_WaitBusy( uint32_t timeout_ms );
 
 static inline void __enter_critical( void );
@@ -84,7 +87,7 @@ static inline void __sys_giveSemaphore( void );
 		uint32_t  Size;				/**< Size of the following user data block in bytes. */
 		uint32_t  dataStartAddr;	/**< Absolute Flash address where the user data begins. */
 		uint16_t  Type;				/**< Application-defined data type tag. */
-		uint16_t  validFlag;		/**< Validity flag: 0xFFFF = valid, any 1→0 transition marks deletion. */
+		uint16_t  validFlag;		/**< Validity flag: 0xF0F0 = valid, any 1→0 transition marks deletion. */
 		char Desc[16];				/**< Human-readable description string (null-padded). */
 
 	} desc_t;
@@ -207,12 +210,13 @@ Cus_Flash_Lock( void )
 
 	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) != 0 )    return;   /* Has already be locked. Return. */
 
-	uint32_t timeout = Cus_Flash_GetSpinCount(100);
-	while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+	uint32_t start = CUS_FLASH_GET_TICK();
+	while( FLASH->SR & FLASH_SR_BSY_Msk )
 	{
+		if ( (CUS_FLASH_GET_TICK() - start) >= 100 ) break;
 		__nop();
 	}
-	if ( !timeout )
+	if ( FLASH->SR & FLASH_SR_BSY_Msk )
 	{
 		/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
 		Cus_FLASH_LockFailed_Hook();
@@ -239,12 +243,13 @@ Cus_Flash_Unlock( void )
 
 	if ( (FLASH_CR_RegTemp & FLASH_CR_LOCK_Msk) == 0 )  return;   /* Has already be unlocked. Return. */
 
-	uint32_t timeout = Cus_Flash_GetSpinCount(100);
-	while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+	uint32_t start = CUS_FLASH_GET_TICK();
+	while( FLASH->SR & FLASH_SR_BSY_Msk )
 	{
+		if ( (CUS_FLASH_GET_TICK() - start) >= 100 ) break;
 		__nop();
 	}
-	if ( !timeout )
+	if ( FLASH->SR & FLASH_SR_BSY_Msk )
 	{
 		/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
 		Cus_FLASH_UnlockFailed_Hook();
@@ -342,22 +347,21 @@ Cus_Flash_CalibrateLatency( void )
 
 
 
-/**
- * @brief 根据系统时钟计算自旋等待的循环次数（粗略估算）
- * @param ms 超时毫秒数
- * @return 循环次数（每个循环约 5~6 个指令周期）
- */
-static uint32_t 
-Cus_Flash_GetSpinCount( uint32_t ms )
+uint32_t 
+Cus_Flash_SYS_GetTick( void )
 {
-	// 估算每个循环消耗的 CPU 周期数.
-	const uint32_t cycles_per_loop = 5;
+	return DWT->CYCCNT / gs_dwtTickPerMs;
+}
 
-	uint32_t sysclk = SystemCoreClock;
 
-	uint32_t total_cycles = (ms * sysclk) / 1000;
 
-	return total_cycles / cycles_per_loop;
+void Cus_Flash_SYS_TickInit( void )
+{
+	/* Init DWT cycle counter for CUS_FLASH_GET_TICK default. */
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+	gs_dwtTickPerMs = SystemCoreClock / 1000;
 }
 
 
@@ -365,8 +369,15 @@ Cus_Flash_GetSpinCount( uint32_t ms )
 static Cus_Flash_State_t 
 Cus_Flash_WaitBusy( uint32_t timeout_ms )
 {
-	uint32_t timeout = Cus_Flash_GetSpinCount(timeout_ms);
-	while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout ) { __nop(); }
+	uint32_t start = CUS_FLASH_GET_TICK();
+	while( FLASH->SR & FLASH_SR_BSY_Msk )
+	{
+		if ( (CUS_FLASH_GET_TICK() - start) >= timeout_ms )
+		{
+			return CUS_FLASH_TIMEOUT;
+		}
+		__nop();
+	}
 
 	#if (DEVICE_STM32F4xx)
 		static const uint32_t errorMask = FLASH_SR_PGAERR_Msk | FLASH_SR_PGPERR_Msk | FLASH_SR_PGSERR_Msk | FLASH_SR_WRPERR_Msk;
@@ -572,6 +583,8 @@ Cus_Flash_PVDConfig( Cus_Flash_PVD_t PVDLevel )
 	/* Enable PVD NVIC and set priority. */
 	NVIC_EnableIRQ(PVD_IRQn);
 	NVIC_SetPriority(PVD_IRQn, 0);
+
+	return CUS_FLASH_OK;
 }
 
 
@@ -934,12 +947,13 @@ Cus_Flash_PVDClr( void )
 	{
 		if ( !pSector )		return CUS_FLASH_PARAMETER;		/* Invalid parameter. */
 
-		uint32_t timeout = Cus_Flash_GetSpinCount(300);
-		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+		uint32_t start = CUS_FLASH_GET_TICK();
+		while( FLASH->SR & FLASH_SR_BSY_Msk )
 		{
+			if ( (CUS_FLASH_GET_TICK() - start) >= 300 ) break;
 			__nop();
 		}
-		if ( !timeout )
+		if ( FLASH->SR & FLASH_SR_BSY_Msk )
 		{
 			/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
 			Cus_FLASH_EraseSectorFailed_Hook(pSector);
@@ -985,15 +999,18 @@ Cus_Flash_PVDClr( void )
 		__exit_critical();
 
 		/* Wait for BSY to clear (erase finished). */
-		timeout = Cus_Flash_GetSpinCount(3000);		/* about 3s. */
-		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
 		{
-			__nop();
-		}
-		if ( !timeout )
-		{
-			/* Error! BSY clear timeout. */
-			goto ERROR;
+			uint32_t start = CUS_FLASH_GET_TICK();
+			while( FLASH->SR & FLASH_SR_BSY_Msk )
+			{
+				if ( (CUS_FLASH_GET_TICK() - start) >= 3000 ) break;
+				__nop();
+			}
+			if ( FLASH->SR & FLASH_SR_BSY_Msk )
+			{
+				/* Error! BSY clear timeout. */
+				goto ERROR;
+			}
 		}
 
 		/* Normal back. */
@@ -1063,12 +1080,13 @@ Cus_Flash_PVDClr( void )
 		#endif
 		return CUS_FLASH_PARAMETER;
 
-		uint32_t timeout = Cus_Flash_GetSpinCount(300);
-		while( (FLASH->SR & FLASH_SR_BSY_Msk) && --timeout )
+		uint32_t start = CUS_FLASH_GET_TICK();
+		while( FLASH->SR & FLASH_SR_BSY_Msk )
 		{
+			if ( (CUS_FLASH_GET_TICK() - start) >= 300 ) break;
 			__nop();
 		}
-		if ( !timeout )
+		if ( FLASH->SR & FLASH_SR_BSY_Msk )
 		{
 			/* Timeout waiting for Flash BSY bit to clear. Bus is still busy. */
 			return CUS_FLASH_BUSY;
@@ -1139,7 +1157,7 @@ Cus_Flash_PVDClr( void )
 			/* Manager feature. Prepare the data control block. */
 			desc_t title = { 0 };
 			title.Magic = CUS_MANAGER_MAGIC;
-			title.validFlag = 0xFFFF;	/* FFFF=Data Valid. */
+			title.validFlag = 0xFFFF;	/* FFFF: not yet committed (erased). */
 			title.dataStartAddr = (pRequest->pSector->secStartAddr + pRequest->Offset + sizeof(desc_t));
 			title.Size = pRequest->bufSize;
 			title.Type = pRequest->dataType;
@@ -1217,6 +1235,14 @@ Cus_Flash_PVDClr( void )
 
 			user++;
 		}
+
+		#if (CUS_FLASH_USE_MANAGER)
+			/* Write the true validFlag.(Commit) */
+			uint16_t commit = 0xF0F0UL;
+			Cus_Flash_State_t hReturn = Cus_Flash_WriteBuffer((pRequest->pSector->secStartAddr + pRequest->Offset + offsetof(desc_t, validFlag)), (uint8_t *)&commit, sizeof(commit));
+			if ( hReturn != CUS_FLASH_OK )
+				goto PG_ERR;
+		#endif /* CUS_FLASH_USE_MANAGER */
 
 	SUCCESS:	
 		/* Verify The data block. */
@@ -1328,7 +1354,7 @@ Cus_Flash_PVDClr( void )
 
 		for( uint32_t index = 0; index < scanCount_W; index++ )
 		{
-			if ( (*flash == CUS_MANAGER_MAGIC) && (UINT_TO_DESC->validFlag != 0xFFFEUL) )
+			if ( (*flash == CUS_MANAGER_MAGIC) && (UINT_TO_DESC->validFlag == 0xF0F0UL) )
 			{
 				if ( instance->mgrRecordCount >= FLASH_MGR_MAX_RECORDS )
 				{
@@ -1485,13 +1511,19 @@ Cus_Flash_PVDClr( void )
 			desc.validFlag = 0xFFFFUL;
 			memcpy(desc.Desc, package.desc, sizeof(desc.Desc));
 
-			/* Write the Control block. */
+			/* Write the control block. */
 			Cus_Flash_State_t hReturn = Cus_Flash_WriteBuffer(instance->mgrLowestFreeAddr, (uint8_t *)&desc, sizeof(desc_t));
 			if ( hReturn != CUS_FLASH_OK )
 				return hReturn;
 
 			/* Write the User data. */
 			hReturn = Cus_Flash_WriteBuffer((instance->mgrLowestFreeAddr + sizeof(desc_t)), package.pBuffer, package.bufSize);
+			if ( hReturn != CUS_FLASH_OK )
+				return hReturn;
+
+			/* Write the true validFlag(Commit). */
+			uint16_t commit = 0xF0F0UL;
+			hReturn = Cus_Flash_WriteBuffer(instance->mgrLowestFreeAddr + offsetof(desc_t, validFlag), (uint8_t *)&commit, sizeof(commit));
 			if ( hReturn != CUS_FLASH_OK )
 				return hReturn;
 		#endif /* DEVICE_STM32F1xx */
@@ -1578,7 +1610,7 @@ Cus_Flash_PVDClr( void )
 		/* Change the validFlag in Flash for this record to invalid. */
 		uint32_t controlBlockAddr = (instance->mgrRecords[recordIndex].msgStartAddr - sizeof(desc_t));
 		uint32_t validFlagAddr_inFlash = controlBlockAddr + offsetof(desc_t, validFlag);
-		uint16_t delFlag = 0xFFFEUL;	/* bit0 = 0. Invalid Record. */
+		uint16_t delFlag = 0xF0E0UL;	
 
 		Cus_Flash_State_t hReturn = Cus_Flash_WriteBuffer(validFlagAddr_inFlash, (uint8_t *)&delFlag, sizeof(delFlag));
 		if ( hReturn != CUS_FLASH_OK )
@@ -1779,8 +1811,8 @@ Cus_Flash_PVDClr( void )
 			return CUS_FLASH_PARAMETER;
 
 		/* Print the table header first. */
-		pcallback("Idx Type   Size  FlashAddr      Desc");
-		pcallback("-------------------------------------");
+		pcallback(" Idx Type  Size  FlashAddr   Desc");
+		pcallback("-------------------------------------------");
 
 		uint16_t outPutMask[FLASH_MGR_MAX_RECORDS] = { 0 };
 		char buffer[64] = { 0 };
@@ -1817,7 +1849,7 @@ Cus_Flash_PVDClr( void )
 			/* Process this matched entries. */
 			outPutMask[bestIdx] = 1;
 			FlashMgr_Record_t *Record = &instance->mgrRecords[bestIdx];
-			snprintf(buffer, sizeof(buffer), "%3u %4u %6lu 0x%08lX %-16s",
+			snprintf(buffer, sizeof(buffer), "%3u %3u  %5lu   0x%08lX  %-16s",
 						total, Record->msgType, Record->msgSize, Record->msgStartAddr, Record->msgDetail);
 
 			pcallback(buffer);
@@ -1825,13 +1857,51 @@ Cus_Flash_PVDClr( void )
 		}
 
 		/* Print the table tail. */
-		pcallback("-------------------------------------");
+		pcallback("-------------------------------------------");
 
 		uint32_t freeBytes = 0;
 		Cus_FlashMgr_GetFreeSpace(instance, &freeBytes);
 
-		snprintf(buffer, sizeof(buffer), " Free: %lu bytes  |  Records: %u",
+		snprintf(buffer, sizeof(buffer), " Free: %lu bytes  |  Records: %u\n\n",
 					(unsigned long)freeBytes, (unsigned int)total);
+		pcallback(buffer);
+
+		return CUS_FLASH_OK;
+	}
+
+	
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_DumpAll( FlashMgr_Instance_t *instance, Cus_Flash_PrintCB pcallback )
+	{
+		if ( !instance || !pcallback )
+			return CUS_FLASH_PARAMETER;
+
+		/* Print the table header first. */
+		pcallback(" Idx Type  Size  FlashAddr   Desc");
+		pcallback("-------------------------------------------");
+
+		char buffer[64] = { 0 };
+		for( uint16_t i = 0; i < instance->mgrRecordCount; i++ )
+		{
+			FlashMgr_Record_t *Record = &instance->mgrRecords[i];
+			snprintf(buffer, sizeof(buffer), "%3u %3u  %5lu   0x%08lX  %-16s",
+						(unsigned int)(i + 1), (unsigned int)Record->msgType,
+						(unsigned long)Record->msgSize,
+						(unsigned long)Record->msgStartAddr, Record->msgDetail);
+
+			pcallback(buffer);
+			memset(buffer, 0, sizeof(buffer));
+		}
+
+		/* Print the table tail. */
+		pcallback("-------------------------------------------");
+
+		uint32_t freeBytes = 0;
+		Cus_FlashMgr_GetFreeSpace(instance, &freeBytes);
+
+		snprintf(buffer, sizeof(buffer), " Free: %lu bytes  |  Records: %u\n\n",
+					(unsigned long)freeBytes, (unsigned int)instance->mgrRecordCount);
 		pcallback(buffer);
 
 		return CUS_FLASH_OK;
