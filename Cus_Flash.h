@@ -4,13 +4,13 @@
 
 
 /* ****************************************************** */
-	#define DEVICE_STM32F1xx          			(1)
+	#define DEVICE_STM32F1xx          			(0)
 		#if (DEVICE_STM32F1xx)
 			#define CUS_FLASH_BYTE_PER_PAGE		(2048UL)
 			#warning "Please change CUS_FLASH_BYTE_PER_PAGE to your acutal value."
 		#endif 
 
-	#define DEVICE_STM32F4xx          			(0)
+	#define DEVICE_STM32F4xx          			(1)
 		#if (DEVICE_STM32F4xx)
 			#define DEVICE_FLASH_TOTAL_SIZE		(256UL * 1024UL)
 			#warning "Please change DEVICE_FLASH_TOTAL_SIZE to your acutal value. And the format like this: (e.g., 2048*1024 for F42x/F43x)!"
@@ -23,7 +23,7 @@
 			#define FLASH_MGR_MAX_INSTANCES		(4)
 		#endif /* CUS_FLASH_USE_MANAGER */
 
-	#define CUS_FLASH_USE_SYS					(1)
+	#define CUS_FLASH_USE_SYS					(0)
 		#if (CUS_FLASH_USE_SYS)
 			#include "./Cus_Flash_RTOS_Port.h"
 
@@ -32,22 +32,6 @@
 			#endif /* CUS_FLASH_SYS_ON */
 		#endif /* CUS_FLASH_USE_SYS */
 /* ****************************************************** */
-
-
-/**
- * CUS_FLASH_GET_TICK — Get system millisecond timestamp.
- *
- * User may override. Default uses the Cortex-M DWT cycle counter
- * (zero peripheral dependency; call Cus_Flash_SYS_TickInit() at startup).
- * Examples:
- *   #define CUS_FLASH_GET_TICK()  HAL_GetTick()
- *   #define CUS_FLASH_GET_TICK()  xTaskGetTickCount()
- */
-#ifndef CUS_FLASH_GET_TICK
-	#define CUS_FLASH_GET_TICK()  Cus_Flash_SYS_GetTick()
-	void Cus_Flash_SYS_TickInit( void );
-	uint32_t Cus_Flash_SYS_GetTick( void );
-#endif
 
 
 #if (DEVICE_STM32F1xx) && (DEVICE_STM32F4xx)
@@ -65,6 +49,21 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+/**
+ * CUS_FLASH_GET_TICK — Get system millisecond timestamp.
+ *
+ * User may override. Default uses the Cortex-M DWT cycle counter
+ * (zero peripheral dependency; call Cus_Flash_SYS_TickInit() at startup).
+ * Examples:
+ *   #define CUS_FLASH_GET_TICK()  HAL_GetTick()
+ *   #define CUS_FLASH_GET_TICK()  xTaskGetTickCount()
+ */
+#ifndef CUS_FLASH_GET_TICK
+	#define CUS_FLASH_GET_TICK()  Cus_Flash_SYS_GetTick()
+	void Cus_Flash_SYS_TickInit( void );
+	uint32_t Cus_Flash_SYS_GetTick( void );
+#endif
 
 
 typedef enum Cus_Flash_State
@@ -293,6 +292,7 @@ typedef enum Cus_Flash_PVD
 
 	/* Debug print callback. */
 	typedef void (*Cus_Flash_PrintCB)( const char *src );
+	typedef bool (*Cus_Flash_KeepCB)( const FlashMgr_Record_t *record, void *ctx );
 
 
 	Cus_Flash_State_t Cus_FlashMgr_Init( FlashMgr_Instance_t *instance, uint32_t start_addr, uint32_t end_addr );
@@ -307,6 +307,7 @@ typedef enum Cus_Flash_PVD
 	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
 	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
 	Cus_Flash_State_t Cus_FlashMgr_DumpAll( FlashMgr_Instance_t *instance, Cus_Flash_PrintCB pcallback );
+	Cus_Flash_State_t Cus_FlashMgr_Compact( FlashMgr_Instance_t *instance, Cus_Flash_KeepCB cb, void *ctx, uint8_t *backBuf, uint32_t bufSize );
 
 	__weak void Cus_FLASH_MGRBufOVFL_Hook( uint16_t TotalRecords );
 

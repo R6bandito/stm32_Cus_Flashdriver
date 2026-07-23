@@ -1,4 +1,5 @@
 #include "./Cus_Flash.h"
+#pragma diag_suppress 546
 
 
 /* ****************************************************** */
@@ -8,7 +9,7 @@ bool Cus_Flash_CalibrateLatency( void );
 void Cus_Flash_SYS_TickInit( void );
 uint32_t Cus_Flash_SYS_GetTick( void );
 Cus_Flash_State_t Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Size );
-bool Cus_Flash_VerifyBuffer(uint32_t StartAddress, uint8_t *pData, uint32_t Size);
+bool Cus_Flash_VerifyBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Size );
 bool Cus_Flash_IsValid( uint32_t StartAddress, uint32_t Size );
 
 Cus_Flash_State_t Cus_Flash_PVDConfig( Cus_Flash_PVD_t PVDLevel );
@@ -57,6 +58,7 @@ void Cus_Flash_PVDClr( void );
 	Cus_Flash_State_t Cus_FlashMgr_DeleteAllByDesc( FlashMgr_Instance_t *instance, const char *desc, uint16_t *delCnt );
 	Cus_Flash_State_t Cus_FlashMgr_DumpByDesc( FlashMgr_Instance_t *instance, const char *desc, Cus_Flash_PrintCB pcallback );
 	Cus_Flash_State_t Cus_FlashMgr_DumpAll( FlashMgr_Instance_t *instance, Cus_Flash_PrintCB pcallback );
+	Cus_Flash_State_t Cus_FlashMgr_Compact( FlashMgr_Instance_t *instance, Cus_Flash_KeepCB cb, void *ctx, uint8_t *backBuf, uint32_t bufSize );
 #endif /* CUS_FLASH_USE_MANAGER */
 /* ****************************************************** */
 
@@ -91,6 +93,14 @@ static inline void __sys_giveSemaphore( void );
 		char Desc[16];				/**< Human-readable description string (null-padded). */
 
 	} desc_t;
+
+	typedef struct 
+	{
+		uint32_t size;
+		uint16_t type;
+		char     desc[16];
+
+	} CompactMeta;
 
 	static FlashMgr_Instance_t *gs_ActivateMgr[FLASH_MGR_MAX_INSTANCES];
 	static uint16_t gs_ActivateCount;
@@ -411,10 +421,6 @@ Cus_Flash_WriteBuffer( uint32_t StartAddress, uint8_t *pData, uint32_t Buffer_Si
 		/* The Addr must aligned to half-word. */
 		return CUS_FLASH_ALIGNED_ERR;
 	}
-
-	/* Check if the area is writable. */
-	if ( !Cus_Flash_IsValid(StartAddress, Buffer_Size) )
-		return CUS_FLASH_NOT_ERASED;
 
 	Cus_Flash_State_t hReturn =  Cus_Flash_WaitBusy(50);
 	if ( hReturn != CUS_FLASH_OK )
@@ -1176,7 +1182,7 @@ Cus_Flash_PVDClr( void )
 				desc_ptr[index] = src_ptr[index];
 
 				/* Wait BSY clear and check Status Register. */
-				if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+				if ( Cus_Flash_WaitBusy(150) != CUS_FLASH_OK )	goto PG_ERR;
 			}
 
 			/* Verify the control block if be written correctly. */
@@ -1221,7 +1227,7 @@ Cus_Flash_PVDClr( void )
 				*user = LastWord;
 
 				/* Wait BSY clear and check Status Register. */
-				if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+				if ( Cus_Flash_WaitBusy(150) != CUS_FLASH_OK )	goto PG_ERR;
 
 				goto SUCCESS;
 			}
@@ -1231,11 +1237,12 @@ Cus_Flash_PVDClr( void )
 			*user = word;
 
 			/* Wait BSY clear and check Status Register. */
-			if ( Cus_Flash_WaitBusy(50) != CUS_FLASH_OK )	goto PG_ERR;
+			if ( Cus_Flash_WaitBusy(150) != CUS_FLASH_OK )	goto PG_ERR;
 
 			user++;
 		}
 
+	SUCCESS:	
 		#if (CUS_FLASH_USE_MANAGER)
 			/* Write the true validFlag.(Commit) */
 			uint16_t commit = 0xF0F0UL;
@@ -1244,7 +1251,6 @@ Cus_Flash_PVDClr( void )
 				goto PG_ERR;
 		#endif /* CUS_FLASH_USE_MANAGER */
 
-	SUCCESS:	
 		/* Verify The data block. */
 		if ( !Cus_Flash_VerifyBuffer(dataBlockStartAddr, pRequest->pBuffer, pRequest->bufSize) )	goto VERIFY_ERR;
 
@@ -1903,6 +1909,89 @@ Cus_Flash_PVDClr( void )
 		snprintf(buffer, sizeof(buffer), " Free: %lu bytes  |  Records: %u\n\n",
 					(unsigned long)freeBytes, (unsigned int)instance->mgrRecordCount);
 		pcallback(buffer);
+
+		return CUS_FLASH_OK;
+	}
+
+
+
+	Cus_Flash_State_t 
+	Cus_FlashMgr_Compact( FlashMgr_Instance_t *instance, Cus_Flash_KeepCB cb, void *ctx, uint8_t *backBuf, uint32_t bufSize )
+	{
+		/* Check if the instance is valid. */
+		if ( !instance || !instance->mgrStartAddr )
+			return CUS_FLASH_PARAMETER;
+
+		/* Parameter check. */
+		if ( !backBuf || !cb || bufSize < sizeof(FlashMgr_Record_t) )
+			return CUS_FLASH_PARAMETER;
+
+		/* Create an index array for the entries to keep. */
+		int16_t backIndexArr[FLASH_MGR_MAX_RECORDS] = { -1 };
+		static CompactMeta backMeta[FLASH_MGR_MAX_RECORDS] = { 0 };
+		uint16_t backCount = 0;
+
+		for( uint16_t index = 0; index < instance->mgrRecordCount; index++ )
+		{
+			/* Invoke user callback to determine which entries should be retained. */
+			bool isRetained = cb(&instance->mgrRecords[index], ctx);
+			if ( isRetained )
+			{
+				/* This entries should be retained. */
+				if ( backCount >= FLASH_MGR_MAX_RECORDS )
+					return CUS_FLASH_OVFLW_ERR;
+				backIndexArr[backCount++] = index;
+			}
+		}
+
+		/* Check if the retention list has entries. If so, proceed with backup. */
+		if ( backCount )
+		{
+			uint8_t *pUser = backBuf;
+
+			for( uint16_t index = 0; index < backCount; index++ )
+			{
+				if ( backIndexArr[index] < 0 )  continue;
+
+				FlashMgr_Record_t *rec = &instance->mgrRecords[backIndexArr[index]];
+
+				if ( (uint32_t)(pUser - backBuf) + rec->msgSize > bufSize )
+					return CUS_FLASH_NOSPACE_ERR;
+
+				/* Save the user data. */
+				memcpy(pUser, (const void *)(uintptr_t)rec->msgStartAddr, rec->msgSize);
+
+				/* Save the metadata. */
+				backMeta[index].size = rec->msgSize;
+				backMeta[index].type = rec->msgType;
+				memcpy(backMeta[index].desc, rec->msgDetail, sizeof(rec->msgDetail));
+
+				/* Move pUser to the next item. */
+				pUser += rec->msgSize;
+			}
+		}
+
+		/* Erase the entire managed area. */
+		Cus_Flash_State_t hReturn = Cus_FlashMgr_EraseRegion(instance);
+		if ( hReturn != CUS_FLASH_OK )
+			return hReturn;	
+		
+		/* Write back the retained entries in append mode one by one. */
+		uint8_t *pBuf = backBuf;
+		Cus_FlashMgr_Req_t Req = { 0 };
+		for( uint16_t index = 0; index < backCount; index++ )
+		{     
+			Req.DataBuff = pBuf;
+			pBuf += backMeta[index].size;
+
+			Req.DataSize = backMeta[index].size;
+			Req.DataType = backMeta[index].type;
+			memcpy(Req.DataDesc, backMeta[index].desc, sizeof(Req.DataDesc));
+
+			hReturn = Cus_FlashMgr_Append(instance, &Req);
+			if ( hReturn != CUS_FLASH_OK )
+				return hReturn;
+		}
 
 		return CUS_FLASH_OK;
 	}

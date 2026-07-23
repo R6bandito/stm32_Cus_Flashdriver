@@ -2,7 +2,7 @@
 #define __CUS_FLASH_RTOS_H__
 
 
-#if (1)
+#if (0)
 
     #define CUS_FLASH_SYS_ON
 
